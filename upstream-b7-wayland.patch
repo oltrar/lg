@@ -1,0 +1,1513 @@
+diff --git a/host/platform/Linux/capture/pipewire/src/frame_layout.h b/host/platform/Linux/capture/pipewire/src/frame_layout.h
+new file mode 100644
+--- /dev/null
++++ b/host/platform/Linux/capture/pipewire/src/frame_layout.h
+@@ -0,0 +1,43 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++#pragma once
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++struct LGFrameLayout
++{
++  size_t offset, sourcePitch, rowBytes, height, packedSize;
++};
++
++/* Reject negative strides and wrapped images. Offset is modulo maxsize. */
++static inline bool lgFrameLayout(struct LGFrameLayout * out,
++  uint32_t width, uint32_t height, uint32_t maxsize,
++  uint32_t offset, uint32_t size, int32_t stride)
++{
++  if (!out || !width || !height || !maxsize || stride < 0)
++    return false;
++  const size_t row = (size_t)width * 4;
++  if (row / 4 != width)
++    return false;
++  const size_t pitch = stride ? (size_t)stride : row;
++  const size_t start = offset % maxsize;
++  const size_t available = size < maxsize ? size : maxsize;
++  if (pitch < row || height > SIZE_MAX / row ||
++      height - 1 > (SIZE_MAX - row) / pitch)
++    return false;
++  const size_t span = ((size_t)height - 1) * pitch + row;
++  if (span > available || span > maxsize - start)
++    return false;
++  *out = (struct LGFrameLayout){start, pitch, row, height, row * height};
++  return true;
++}
++
++static inline void lgFramePack(uint8_t * dst, const uint8_t * src,
++  const struct LGFrameLayout * layout)
++{
++  src += layout->offset;
++  for (size_t y = 0; y < layout->height; ++y)
++    memcpy(dst + y * layout->rowBytes, src + y * layout->sourcePitch,
++      layout->rowBytes);
++}
+diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform/Linux/capture/pipewire/src/pipewire.c
+--- a/host/platform/Linux/capture/pipewire/src/pipewire.c
++++ b/host/platform/Linux/capture/pipewire/src/pipewire.c
+@@ -1,493 +1,381 @@
+ /**
+  * Looking Glass
+- * Copyright © 2017-2025 The Looking Glass Authors
+- * https://looking-glass.io
++ * Copyright (C) 2017-2025 The Looking Glass Authors
++ * Copyright (C) 2026 Linux Wayland integration contributors
++ * SPDX-License-Identifier: GPL-2.0-or-later
+  *
+- * This program is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License as published by the Free
+- * Software Foundation; either version 2 of the License, or (at your option)
+- * any later version.
+- *
+- * This program is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+- * more details.
+- *
+- * You should have received a copy of the GNU General Public License along
+- * with this program; if not, write to the Free Software Foundation, Inc., 59
+- * Temple Place, Suite 330, Boston, MA 02111-1307 USA
++ * B7 PipeWire adaptation: raw SDR pixels over the unchanged B7 LGMP transport.
++ * An owned snapshot separates producer lifetime from shared-memory publication.
+  */
+-
+ #include "portal.h"
++#include "frame_layout.h"
+ #include "interface/capture.h"
+-#include "interface/platform.h"
+-#include "common/util.h"
+ #include "common/debug.h"
+-#include "common/stringutils.h"
+-#include <string.h>
++#include "common/option.h"
++#include <errno.h>
+ #include <stdlib.h>
+ #include <unistd.h>
+-
+ #include <pipewire/pipewire.h>
++#include <spa/buffer/meta.h>
+ #include <spa/pod/builder.h>
+-#include <spa/param/format.h>
+ #include <spa/param/video/format-utils.h>
+ 
+ struct pipewire
+ {
+-  struct Portal         * portal;
+-  char                  * sessionHandle;
+-  struct pw_thread_loop * threadLoop;
+-  struct pw_context     * context;
+-  struct pw_core        * core;
+-  struct spa_hook         coreListener;
+-  struct pw_stream      * stream;
+-  struct spa_hook         streamListener;
+-
+-  bool          stop;
+-  bool          hasFormat;
+-  bool          formatChanged;
+-  int           width, height, dataHeight, pitch;
++  struct Portal * portal;
++  char * sessionHandle;
++  struct pw_thread_loop * loop;
++  struct pw_context * context;
++  struct pw_core * core;
++  struct pw_stream * stream;
++  struct spa_hook coreListener, streamListener;
++  struct pw_buffer * pending;
++  /* Live state is protected by the PipeWire loop lock. */
++  bool started, stop, failed, hasFormat, connected, warnedBuffer;
++  unsigned width, height, formatVer;
+   CaptureFormat format;
+-  bool          hdr;
+-  bool          hdrPQ;
+-  uint8_t     * frameData;
+-  unsigned int  formatVer;
++  /* Only the Looking Glass capture thread touches the snapshot. */
++  uint8_t * snapshot;
++  size_t capacity;
++  unsigned readyWidth, readyHeight, readyVersion, dataHeight;
++  CaptureFormat readyFormat;
+ };
+-
+-static struct pipewire * this = NULL;
+-
+-// forwards
+-
++static struct pipewire * this;
+ static bool pipewire_deinit(void);
+ 
+-// implementation
+-
++static bool fpsValidator(struct Option * opt, const char ** error)
++{
++  if (opt->value.x_int >= 1 && opt->value.x_int <= 360)
++    return true;
++  *error = "PipeWire fps must be between 1 and 360";
++  return false;
++}
++static void pipewire_initOptions(void)
++{
++  struct Option options[] = {
++    {.module = "pipewire", .name = "fps",
++     .description = "Requested maximum capture rate (compositor may limit it)",
++     .type = OPTION_TYPE_INT, .value.x_int = 60, .validator = fpsValidator}, {0}
++  };
++  option_register(options);
++}
+ static const char * pipewire_getName(void)
+ {
+-  return "PipeWire";
+-}
+-
+-static bool pipewire_create(
+-  CaptureGetPointerBuffer getPointerBufferFn,
+-  CapturePostPointerBuffer postPointerBufferFn,
+-  unsigned                 frameBuffers
+-)
+-{
+-  DEBUG_ASSERT(!this);
++  return "PipeWire (B7 Wayland integration, SDR)";
++}
++static bool pipewire_create(CaptureGetPointerBuffer getPointerBufferFn,
++  CapturePostPointerBuffer postPointerBufferFn, unsigned frameBuffers)
++{
+   pw_init(NULL, NULL);
+   this = calloc(1, sizeof(*this));
+-  return true;
+-}
+-
+-static void coreErrorCallback(void * opaque, uint32_t id, int seq, int res, const char * message)
+-{
+-  DEBUG_ERROR("pipewire error: id %" PRIu32 ", seq: %d, res: %d (%s): %s",
+-    id, seq, res, strerror(res), message);
+-}
+-
++  return this != NULL;
++}
++static void discardPending(void)
++{
++  if (this->pending)
++  {
++    pw_stream_queue_buffer(this->stream, this->pending);
++    this->pending = NULL;
++  }
++}
++static void coreError(void * opaque, uint32_t id, int seq, int res,
++  const char * message)
++{
++  DEBUG_ERROR("PipeWire core error %d: %s", res, message);
++  this->failed = true;
++  pw_thread_loop_signal(this->loop, false);
++}
+ static const struct pw_core_events coreEvents = {
+-  PW_VERSION_CORE_EVENTS,
+-  .error = coreErrorCallback,
++  PW_VERSION_CORE_EVENTS, .error = coreError
+ };
+-
+-static bool startStream(struct pw_stream * stream, uint32_t node)
+-{
+-  char buffer[1024];
+-  struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+-  const struct spa_pod * param = spa_pod_builder_add_object(
+-    &builder, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
++static void streamProcess(void * opaque)
++{
++  /* RT_PROCESS is not enabled: callbacks run with the loop lock held. */
++  struct pw_buffer * buffer;
++  while ((buffer = pw_stream_dequeue_buffer(this->stream)))
++  {
++    discardPending();
++    this->pending = buffer;
++  }
++  pw_thread_loop_signal(this->loop, false);
++}
++static void streamRemoveBuffer(void * opaque, struct pw_buffer * buffer)
++{
++  if (this->pending == buffer)
++    this->pending = NULL;
++}
++static void streamState(void * opaque, enum pw_stream_state oldState,
++  enum pw_stream_state state, const char * error)
++{
++  DEBUG_INFO("PipeWire: %s -> %s", pw_stream_state_as_string(oldState),
++    pw_stream_state_as_string(state));
++  if (state == PW_STREAM_STATE_PAUSED || state == PW_STREAM_STATE_STREAMING)
++    this->connected = true;
++  if (state == PW_STREAM_STATE_ERROR ||
++      (state == PW_STREAM_STATE_UNCONNECTED && this->connected && !this->stop))
++  {
++    DEBUG_ERROR("PipeWire stream closed: %s", error ? error : "session ended");
++    this->failed = true;
++  }
++  pw_thread_loop_signal(this->loop, false);
++}
++static void streamFormat(void * opaque, uint32_t id, const struct spa_pod * param)
++{
++  if (id != SPA_PARAM_Format)
++    return;
++  discardPending();
++  this->hasFormat = false;
++  if (!param)
++    return;
++  struct spa_video_info_raw info = {0};
++  if (spa_format_video_raw_parse(param, &info) < 0 ||
++      !info.size.width || !info.size.height ||
++      info.size.width > 8192 || info.size.height > 8192)
++    goto unsupported;
++  switch (info.format)
++  {
++    case SPA_VIDEO_FORMAT_BGRA:
++    case SPA_VIDEO_FORMAT_BGRx: this->format = CAPTURE_FMT_BGRA; break;
++    case SPA_VIDEO_FORMAT_RGBA:
++    case SPA_VIDEO_FORMAT_RGBx: this->format = CAPTURE_FMT_RGBA; break;
++    default: goto unsupported;
++  }
++  this->width = info.size.width;
++  this->height = info.size.height;
++  ++this->formatVer;
++  this->hasFormat = true;
++  uint8_t storage[512];
++  struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage, sizeof(storage));
++  const struct spa_pod * buffers = spa_pod_builder_add_object(&builder,
++    SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
++    SPA_PARAM_BUFFERS_dataType,
++      SPA_POD_Int((1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_MemFd)));
++  if (pw_stream_update_params(this->stream, &buffers, 1) < 0)
++    goto unsupported;
++  DEBUG_INFO("Raw SDR capture: %ux%u, format %u", this->width,
++    this->height, info.format);
++  pw_thread_loop_signal(this->loop, false);
++  return;
++unsupported:
++  DEBUG_ERROR("Unsupported PipeWire format or geometry; use an SDR output");
++  this->failed = true;
++  pw_thread_loop_signal(this->loop, false);
++}
++static const struct pw_stream_events streamEvents = {
++  PW_VERSION_STREAM_EVENTS, .state_changed = streamState,
++  .param_changed = streamFormat, .process = streamProcess,
++  .remove_buffer = streamRemoveBuffer
++};
++static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
++{
++  this->stop = this->failed = this->hasFormat = this->connected = false;
++  this->warnedBuffer = false;
++  this->readyWidth = this->readyHeight = 0;
++  this->portal = portal_create();
++  if (!this->portal ||
++      !portal_createScreenCastSession(this->portal, &this->sessionHandle) ||
++      !portal_selectSource(this->portal, this->sessionHandle))
++    goto fail;
++  uint32_t node = portal_getPipewireNode(this->portal, this->sessionHandle);
++  if (!node)
++    goto fail;
++  int fd = portal_openPipewireRemote(this->portal, this->sessionHandle);
++  if (fd < 0)
++    goto fail;
++  this->loop = pw_thread_loop_new("looking-glass-capture", NULL);
++  if (!this->loop)
++  {
++    close(fd);
++    goto fail;
++  }
++  this->context = pw_context_new(pw_thread_loop_get_loop(this->loop), NULL, 0);
++  if (!this->context || pw_thread_loop_start(this->loop) < 0)
++  {
++    close(fd);
++    goto fail;
++  }
++  this->started = true;
++  pw_thread_loop_lock(this->loop);
++  this->core = pw_context_connect_fd(this->context, fd, NULL, 0);
++  if (!this->core)
++    goto failLocked;
++  pw_core_add_listener(this->core, &this->coreListener, &coreEvents, NULL);
++  this->stream = pw_stream_new(this->core, "Looking Glass Linux Guest",
++    pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY,
++      "Capture", PW_KEY_MEDIA_ROLE, "Screen", NULL));
++  if (!this->stream)
++    goto failLocked;
++  pw_stream_add_listener(this->stream, &this->streamListener, &streamEvents, NULL);
++  uint8_t storage[1024];
++  struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage, sizeof(storage));
++  const unsigned fps = option_get_int("pipewire", "fps");
++  const struct spa_pod * format = spa_pod_builder_add_object(&builder,
++    SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+     SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+     SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+-    SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(6,
++    SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(4,
+       SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA,
+-      SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx,
+-      SPA_VIDEO_FORMAT_xBGR_210LE, SPA_VIDEO_FORMAT_RGBA_F16),
++      SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx),
+     SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(
+-      &SPA_RECTANGLE(1920, 1080), &SPA_RECTANGLE(1, 1), &SPA_RECTANGLE(8192, 4320)),
++      &SPA_RECTANGLE(1920, 1080), &SPA_RECTANGLE(1, 1), &SPA_RECTANGLE(8192, 8192)),
+     SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(
+-      &SPA_FRACTION(60, 1), &SPA_FRACTION(0, 1), &SPA_FRACTION(360, 1)));
+-
+-  return pw_stream_connect(stream, PW_DIRECTION_INPUT, node,
+-    PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, &param, 1) >= 0;
+-}
+-
+-static void streamProcessCallback(void * opaque)
+-{
+-  if (!this->hasFormat)
+-    return;
+-
+-  struct pw_buffer * pwBuffer = NULL;
+-
+-  // dequeue all buffers to get the latest one
+-  while (true)
+-  {
+-    struct pw_buffer * tmp = pw_stream_dequeue_buffer(this->stream);
+-    if (!tmp)
+-      break;
+-    if (pwBuffer)
+-      pw_stream_queue_buffer(this->stream, pwBuffer);
+-    pwBuffer = tmp;
+-  }
+-
+-  if (!pwBuffer)
+-  {
+-    DEBUG_WARN("Pipewire out of buffers");
+-    return;
+-  }
+-
+-  struct spa_buffer * buffer = pwBuffer->buffer;
+-  if (!buffer->datas[0].chunk->size)
+-    return;
+-
+-  this->frameData = buffer->datas[0].data;
+-
+-  pw_thread_loop_signal(this->threadLoop, true);
+-  pw_stream_queue_buffer(this->stream, pwBuffer);
+-}
+-
+-static CaptureFormat convertSpaFormat(enum spa_video_format spa)
+-{
+-  switch (spa)
+-  {
+-    case SPA_VIDEO_FORMAT_RGBA:
+-    case SPA_VIDEO_FORMAT_RGBx:
+-      return CAPTURE_FMT_RGBA;
+-
+-    case SPA_VIDEO_FORMAT_BGRA:
+-    case SPA_VIDEO_FORMAT_BGRx:
+-      return CAPTURE_FMT_BGRA;
+-
+-    case SPA_VIDEO_FORMAT_xBGR_210LE:
+-      return CAPTURE_FMT_RGBA10;
+-
+-    case SPA_VIDEO_FORMAT_RGBA_F16:
+-      return CAPTURE_FMT_RGBA16F;
+-
+-    default:
+-      return -1;
+-  }
+-}
+-
+-static void streamParamChangedCallback(void * opaque, uint32_t id,
+-  const struct spa_pod * param)
+-{
+-  if (!param || id != SPA_PARAM_Format)
+-    return;
+-
+-  uint32_t mediaType, mediaSubtype;
+-  if (spa_format_parse(param, &mediaType, &mediaSubtype) < 0 ||
+-      mediaType != SPA_MEDIA_TYPE_video ||
+-      mediaSubtype != SPA_MEDIA_SUBTYPE_raw)
+-    return;
+-
+-  struct spa_video_info_raw info;
+-  if (spa_format_video_raw_parse(param, &info) < 0)
+-  {
+-    DEBUG_ERROR("Failed to parse video info");
+-    return;
+-  }
+-
+-  this->width  = info.size.width;
+-  this->height = info.size.height;
+-  this->format = convertSpaFormat(info.format);
+-  this->hdr    = info.format & (
+-      SPA_VIDEO_FORMAT_xBGR_210LE |
+-      SPA_VIDEO_FORMAT_RGBA_F16);
+-  this->hdrPQ  = true; // this is assumed and untested
+-
+-  const int bpp = this->format == CAPTURE_FMT_RGBA16F ? 8 : 4;
+-  this->pitch = this->width * bpp;
+-
+-  if (this->hasFormat)
+-  {
+-    this->formatChanged = true;
+-    return;
+-  }
+-
+-  char buffer[1024];
+-  struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+-
+-  param = spa_pod_builder_add_object(
+-    &builder, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
+-    SPA_PARAM_BUFFERS_dataType, SPA_POD_Int(1 << SPA_DATA_MemPtr));
+-  pw_stream_update_params(this->stream, &param, 1);
+-
+-  this->hasFormat = true;
+-  pw_thread_loop_signal(this->threadLoop, true);
+-}
+-
+-static void streamStateChangedCallback(void * opaque,
+-  enum pw_stream_state oldState, enum pw_stream_state newState,
+-  const char * error)
+-{
+-  DEBUG_INFO("PipeWire stream state change: %s -> %s",
+-    pw_stream_state_as_string(oldState), pw_stream_state_as_string(newState));
+-
+-  if (newState == PW_STREAM_STATE_ERROR)
+-    DEBUG_ERROR("PipeWire stream error: %s", error);
+-}
+-
+-static const struct pw_stream_events streamEvents = {
+-  PW_VERSION_STREAM_EVENTS,
+-  .process       = streamProcessCallback,
+-  .state_changed = streamStateChangedCallback,
+-  .param_changed = streamParamChangedCallback,
+-};
+-
+-static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
+-{
+-  DEBUG_ASSERT(this);
+-  this->stop = false;
+-
+-  this->portal = portal_create();
+-  if (!this->portal)
+-  {
+-    DEBUG_ERROR("Failed to create xdg-desktop-portal for screencasting");
+-    goto fail;
+-  }
+-
+-  if (!portal_createScreenCastSession(this->portal, &this->sessionHandle))
+-  {
+-    DEBUG_ERROR("Failed to create ScreenCast session");
+-    goto fail;
+-  }
+-
+-  DEBUG_INFO("Got session handle: %s", this->sessionHandle);
+-
+-  if (!portal_selectSource(this->portal, this->sessionHandle))
+-  {
+-    DEBUG_ERROR("Failed to select source");
+-    goto fail;
+-  }
+-
+-  uint32_t pipewireNode = portal_getPipewireNode(this->portal, this->sessionHandle);
+-  if (!pipewireNode)
+-  {
+-    DEBUG_ERROR("Failed to get pipewire node");
+-    goto fail;
+-  }
+-
+-  int pipewireFd = portal_openPipewireRemote(this->portal, this->sessionHandle);
+-  if (pipewireFd < 0)
+-  {
+-    DEBUG_ERROR("Failed to get pipewire fd");
+-    goto fail;
+-  }
+-
+-  this->threadLoop = pw_thread_loop_new("lg-pipewire-capture", NULL);
+-  if (!this->threadLoop)
+-  {
+-    DEBUG_ERROR("Failed to create pipewire thread loop");
+-    close(pipewireFd);
+-    goto fail;
+-  }
+-
+-  this->context = pw_context_new(pw_thread_loop_get_loop(this->threadLoop), NULL, 0);
+-  if (!this->context)
+-  {
+-    DEBUG_ERROR("Failed to create pipewire context");
+-    close(pipewireFd);
+-    goto fail;
+-  }
+-
+-  if (pw_thread_loop_start(this->threadLoop) < 0)
+-  {
+-    DEBUG_ERROR("Failed to start pipewire thread loop");
+-    close(pipewireFd);
+-    goto fail;
+-  }
+-
+-  pw_thread_loop_lock(this->threadLoop);
+-
+-  this->core = pw_context_connect_fd(this->context, pipewireFd, NULL, 0);
+-  if (!this->core)
+-  {
+-    DEBUG_ERROR("Failed to create pipewire core: %s", strerror(errno));
+-    pw_thread_loop_unlock(this->threadLoop);
+-    close(pipewireFd);
+-    goto fail;
+-  }
+-
+-  pw_core_add_listener(this->core, &this->coreListener, &coreEvents, NULL);
+-
+-  this->stream = pw_stream_new(this->core, "Looking Glass (host)", pw_properties_new(
+-    PW_KEY_MEDIA_TYPE, "Video",
+-    PW_KEY_MEDIA_CATEGORY, "Capture",
+-    PW_KEY_MEDIA_ROLE, "Screen", NULL));
+-  if (!this->stream)
+-  {
+-    DEBUG_ERROR("Failed to create pipewire stream");
+-    pw_thread_loop_unlock(this->threadLoop);
+-    goto fail;
+-  }
+-
+-  this->hasFormat     = false;
+-  this->formatChanged = false;
+-  this->frameData     = NULL;
+-  pw_stream_add_listener(this->stream, &this->streamListener, &streamEvents, NULL);
+-
+-  if (!startStream(this->stream, pipewireNode))
+-  {
+-    DEBUG_ERROR("Failed to start pipewire stream");
+-    pw_thread_loop_unlock(this->threadLoop);
+-    goto fail;
+-  }
+-
+-  pw_thread_loop_unlock(this->threadLoop);
+-
+-  while (!this->hasFormat)
+-    pw_thread_loop_wait(this->threadLoop);
+-
+-  if (this->format < 0)
+-  {
+-    DEBUG_ERROR("Unknown frame format");
+-    pw_thread_loop_accept(this->threadLoop);
+-    goto fail;
+-  }
+-
+-  DEBUG_INFO("Frame size       : %dx%d", this->width, this->height);
+-
+-  pw_thread_loop_accept(this->threadLoop);
+-
++      &SPA_FRACTION(fps, 1), &SPA_FRACTION(0, 1), &SPA_FRACTION(fps, 1)));
++  if (pw_stream_connect(this->stream, PW_DIRECTION_INPUT, node,
++        PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, &format, 1) < 0)
++    goto failLocked;
++  struct timespec deadline;
++  pw_thread_loop_get_time(this->loop, &deadline, 15 * SPA_NSEC_PER_SEC);
++  while (!this->hasFormat && !this->failed)
++    if (pw_thread_loop_timed_wait_full(this->loop, &deadline) < 0)
++    {
++      DEBUG_ERROR("Timed out waiting for a PipeWire video format");
++      goto failLocked;
++    }
++  if (this->failed)
++    goto failLocked;
++  pw_thread_loop_unlock(this->loop);
+   return true;
++failLocked:
++  pw_thread_loop_unlock(this->loop);
+ fail:
+   pipewire_deinit();
+   return false;
+ }
+-
+ static void pipewire_stop(void)
+ {
++  if (!this->loop || !this->started)
++    return;
++  pw_thread_loop_lock(this->loop);
+   this->stop = true;
+-  pw_stream_disconnect(this->stream);
+-  pw_thread_loop_signal(this->threadLoop, false);
+-}
+-
++  discardPending();
++  pw_thread_loop_signal(this->loop, false);
++  pw_thread_loop_unlock(this->loop);
++}
+ static bool pipewire_deinit(void)
+ {
+-  if (this->stream)
+-  {
+-    pw_stream_disconnect(this->stream);
+-    this->stream = NULL;
+-  }
+-
+-  if (this->core)
+-  {
+-    pw_core_disconnect(this->core);
+-    this->core = NULL;
+-  }
+-
+-  if (this->threadLoop)
+-  {
+-    pw_thread_loop_stop(this->threadLoop);
+-    pw_thread_loop_destroy(this->threadLoop);
+-    this->threadLoop = NULL;
+-  }
+-
+-  if (this->sessionHandle)
++  pipewire_stop();
++  /* Stop outside the lock; no callbacks can run after stop returns. */
++  if (this->started)
++    pw_thread_loop_stop(this->loop);
++  this->started = false;
++  if (this->stream) pw_stream_destroy(this->stream);
++  this->stream = NULL;
++  this->pending = NULL;
++  if (this->core) pw_core_disconnect(this->core);
++  this->core = NULL;
++  if (this->context) pw_context_destroy(this->context);
++  this->context = NULL;
++  if (this->loop) pw_thread_loop_destroy(this->loop);
++  this->loop = NULL;
++  if (this->portal)
++  {
+     portal_destroySession(this->portal, &this->sessionHandle);
+-
+-  if (this->portal)
+-  {
+     portal_free(this->portal);
+-    this->portal = NULL;
+-  }
+-
++  }
++  this->portal = NULL;
+   return true;
+ }
+-
+ static void pipewire_free(void)
+ {
+-  DEBUG_ASSERT(this);
+-  pw_deinit();
++  pipewire_deinit();
++  free(this->snapshot);
+   free(this);
+   this = NULL;
+-}
+-
+-static CaptureResult pipewire_capture(
+-  unsigned frameBufferIndex,
+-  FrameBuffer * frame)
+-{
+-  int result;
+-
+-restart:
+-  result = pw_thread_loop_timed_wait(this->threadLoop, 1);
+-
+-  if (this->stop)
+-    return CAPTURE_RESULT_REINIT;
+-
+-  if (result == ETIMEDOUT)
+-    return CAPTURE_RESULT_TIMEOUT;
+-
+-  if (this->formatChanged)
+-  {
+-    ++this->formatVer;
+-    this->formatChanged = false;
+-    pw_thread_loop_accept(this->threadLoop);
+-    goto restart;
+-  }
+-
++  pw_deinit();
++}
++static CaptureResult pipewire_capture(unsigned index, FrameBuffer * target)
++{
++  pw_thread_loop_lock(this->loop);
++  struct timespec deadline;
++  pw_thread_loop_get_time(this->loop, &deadline, SPA_NSEC_PER_SEC);
++  while ((!this->pending || !this->hasFormat) && !this->stop && !this->failed)
++    if (pw_thread_loop_timed_wait_full(this->loop, &deadline) < 0)
++    {
++      pw_thread_loop_unlock(this->loop);
++      return CAPTURE_RESULT_TIMEOUT;
++    }
++  CaptureResult result = CAPTURE_RESULT_TIMEOUT;
++  if (this->stop || this->failed)
++  {
++    result = this->failed ? CAPTURE_RESULT_ERROR : CAPTURE_RESULT_REINIT;
++    goto done;
++  }
++  struct spa_buffer * buffer = this->pending->buffer;
++  struct spa_meta_header * header = spa_buffer_find_meta_data(buffer,
++    SPA_META_Header, sizeof(*header));
++  if (!buffer->n_datas || (header && (header->flags & SPA_META_HEADER_FLAG_CORRUPTED)))
++    goto done;
++  struct spa_data * data = &buffer->datas[0];
++  struct LGFrameLayout layout;
++  if (!data->data || !data->chunk ||
++      (data->type != SPA_DATA_MemPtr && data->type != SPA_DATA_MemFd) ||
++      (data->chunk->flags & SPA_CHUNK_FLAG_CORRUPTED) ||
++      !lgFrameLayout(&layout, this->width, this->height, data->maxsize,
++        data->chunk->offset, data->chunk->size, data->chunk->stride))
++  {
++    if (!this->warnedBuffer)
++      DEBUG_WARN("Dropping unmapped, empty or unsupported PipeWire buffer layout");
++    this->warnedBuffer = true;
++    goto done;
++  }
++  if (layout.packedSize > this->capacity)
++  {
++    uint8_t * memory = realloc(this->snapshot, layout.packedSize);
++    if (!memory)
++    {
++      result = CAPTURE_RESULT_ERROR;
++      goto done;
++    }
++    this->snapshot = memory;
++    this->capacity = layout.packedSize;
++  }
++  /* Copy before returning the buffer; geometry cannot change under this lock. */
++  lgFramePack(this->snapshot, data->data, &layout);
++  this->readyWidth = this->width;
++  this->readyHeight = this->height;
++  this->readyVersion = this->formatVer;
++  this->readyFormat = this->format;
++  this->warnedBuffer = false;
++  result = CAPTURE_RESULT_OK;
++done:
++  discardPending();
++  pw_thread_loop_unlock(this->loop);
++  return result;
++}
++static CaptureResult pipewire_waitFrame(unsigned index, CaptureFrame * frame,
++  const size_t maxFrameSize)
++{
++  const size_t pitch = (size_t)this->readyWidth * 4;
++  if (!pitch || !this->readyHeight || maxFrameSize < pitch)
++    return CAPTURE_RESULT_ERROR;
++  this->dataHeight = maxFrameSize / pitch < this->readyHeight ?
++    maxFrameSize / pitch : this->readyHeight;
++  *frame = (CaptureFrame){
++    .formatVer = this->readyVersion,
++    .screenWidth = this->readyWidth, .screenHeight = this->readyHeight,
++    .dataWidth = this->readyWidth, .dataHeight = this->dataHeight,
++    .frameWidth = this->readyWidth, .frameHeight = this->readyHeight,
++    .pitch = pitch, .stride = this->readyWidth,
++    .format = this->readyFormat, .rotation = CAPTURE_ROT_0,
++    .truncated = this->dataHeight < this->readyHeight,
++    .hdr = false, .hdrPQ = false, .damageRectsCount = 0
++  };
+   return CAPTURE_RESULT_OK;
+ }
+-
+-static CaptureResult pipewire_waitFrame(
+-  unsigned frameBufferIndex,
+-  CaptureFrame * frame,
++static CaptureResult pipewire_getFrame(unsigned index, FrameBuffer * frame,
+   const size_t maxFrameSize)
+ {
+-  if (this->stop)
+-    return CAPTURE_RESULT_REINIT;
+-
+-  const unsigned int maxHeight = maxFrameSize / this->pitch;
+-  this->dataHeight = min(maxHeight, this->height);
+-
+-  frame->formatVer    = this->formatVer;
+-  frame->format       = this->format;
+-  frame->hdr          = this->hdr;
+-  frame->hdrPQ        = this->hdrPQ;
+-  frame->screenWidth  = this->width;
+-  frame->screenHeight = this->height;
+-  frame->dataWidth    = this->width;
+-  frame->dataHeight   = this->dataHeight;
+-  frame->frameWidth   = this->width;
+-  frame->frameHeight  = this->height;
+-  frame->truncated    = maxHeight < this->dataHeight;
+-  frame->pitch        = this->pitch;
+-  frame->stride       = this->width;
+-  frame->rotation     = CAPTURE_ROT_0;
+-
+-  // TODO: implement damage.
+-  frame->damageRectsCount = 0;
+-
+-  return CAPTURE_RESULT_OK;
+-}
+-
+-static CaptureResult pipewire_getFrame(
+-  unsigned frameBufferIndex,
+-  FrameBuffer  * frame,
+-  const size_t maxFrameSize)
+-{
+-  if (this->stop || !this->frameData)
+-    return CAPTURE_RESULT_REINIT;
+-
+-  framebuffer_write(frame, this->frameData,
+-      this->dataHeight * this->pitch);
+-
+-  pw_thread_loop_accept(this->threadLoop);
+-  return CAPTURE_RESULT_OK;
+-}
+-
+-struct CaptureInterface Capture_pipewire =
+-{
+-  .shortName       = "pipewire",
+-  .asyncCapture    = false,
+-  .getName         = pipewire_getName,
+-  .create          = pipewire_create,
+-  .init            = pipewire_init,
+-  .stop            = pipewire_stop,
+-  .deinit          = pipewire_deinit,
+-  .free            = pipewire_free,
+-  .capture         = pipewire_capture,
+-  .waitFrame       = pipewire_waitFrame,
+-  .getFrame        = pipewire_getFrame
++  const size_t size = (size_t)this->readyWidth * 4 * this->dataHeight;
++  if (size > maxFrameSize || !this->snapshot)
++    return CAPTURE_RESULT_ERROR;
++  return framebuffer_write(frame, this->snapshot, size) ?
++    CAPTURE_RESULT_OK : CAPTURE_RESULT_ERROR;
++}
++struct CaptureInterface Capture_pipewire = {
++  .shortName = "pipewire", .asyncCapture = false,
++  .getName = pipewire_getName, .initOptions = pipewire_initOptions,
++  .create = pipewire_create, .init = pipewire_init, .stop = pipewire_stop,
++  .deinit = pipewire_deinit, .free = pipewire_free,
++  .capture = pipewire_capture, .waitFrame = pipewire_waitFrame,
++  .getFrame = pipewire_getFrame
+ };
+diff --git a/host/platform/Linux/capture/pipewire/src/portal.c b/host/platform/Linux/capture/pipewire/src/portal.c
+--- a/host/platform/Linux/capture/pipewire/src/portal.c
++++ b/host/platform/Linux/capture/pipewire/src/portal.c
+@@ -1,428 +1,240 @@
+ /**
+  * Looking Glass
+- * Copyright © 2017-2025 The Looking Glass Authors
+- * https://looking-glass.io
+- *
+- * This program is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License as published by the Free
+- * Software Foundation; either version 2 of the License, or (at your option)
+- * any later version.
+- *
+- * This program is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+- * more details.
+- *
+- * You should have received a copy of the GNU General Public License along
+- * with this program; if not, write to the Free Software Foundation, Inc., 59
+- * Temple Place, Suite 330, Boston, MA 02111-1307 USA
++ * Copyright (C) 2017-2025 The Looking Glass Authors
++ * Copyright (C) 2026 Linux Wayland integration contributors
++ * SPDX-License-Identifier: GPL-2.0-or-later
+  */
+-
+ #include "portal.h"
+ #include "common/debug.h"
+-#include "common/stringutils.h"
++#include <stdlib.h>
+ #include <string.h>
+-#include <stdlib.h>
+-
++#include <unistd.h>
+ #include <gio/gio.h>
+ #include <gio/gunixfdlist.h>
++#include <glib/gstdio.h>
++
++#define PORTAL_NAME "org.freedesktop.portal.Desktop"
++#define PORTAL_PATH "/org/freedesktop/portal/desktop"
+ 
+ struct Portal
+ {
+   GDBusConnection * conn;
+-  GDBusProxy      * screenCast;
+-  char            * senderName;
++  GDBusProxy * screenCast;
++  char * senderName;
++  char * tokenPath;
++  unsigned serial;
+ };
+-
+-struct DBusCallback
+-{
+-  guint id;
+-  bool completed;
+-  void * opaque;
++struct Request
++{
++  bool completed, expired;
++  uint32_t status;
++  GVariant * results;
+ };
+ 
+-
+ struct Portal * portal_create(void)
+ {
+-  struct Portal * portal = calloc(1, sizeof(*portal));
+-  if (!portal)
+-  {
+-    DEBUG_ERROR("Failed to allocate memory");
++  g_autoptr(GError) error = NULL;
++  g_autofree char * key = NULL;
++  g_autofree char * directory = NULL;
++  struct Portal * p = calloc(1, sizeof(*p));
++  if (!p)
+     return NULL;
+-  }
+-
+-  g_autoptr(GError) err = NULL;
+-  portal->conn = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &err);
+-  if (err)
+-  {
+-    DEBUG_ERROR("Failed to get dbus session: %s", err->message);
++  p->conn = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &error);
++  if (!p->conn)
+     goto fail;
+-  }
+-
+-  const gchar * uniqueName = g_dbus_connection_get_unique_name(portal->conn);
+-  if (!uniqueName)
+-  {
+-    DEBUG_ERROR("Failed to get dbus connection unique name");
++  const char * name = g_dbus_connection_get_unique_name(p->conn);
++  if (!name || name[0] != ':')
+     goto fail;
+-  }
+-
+-  portal->senderName = strdup(uniqueName + 1);
+-  if (!portal->senderName)
+-  {
+-    DEBUG_ERROR("Failed to allocate memory");
++  p->senderName = g_strdup(name + 1);
++  for (char * c = p->senderName; *c; ++c)
++    if (*c == '.') *c = '_';
++  p->screenCast = g_dbus_proxy_new_sync(p->conn, G_DBUS_PROXY_FLAGS_NONE,
++    NULL, PORTAL_NAME, PORTAL_PATH, "org.freedesktop.portal.ScreenCast",
++    NULL, &error);
++  if (!p->screenCast)
+     goto fail;
+-  }
+-
+-  char * ptr = portal->senderName;
+-  while ((ptr = strchr(ptr, '.')))
+-    *ptr++ = '_';
+-
+-  portal->screenCast = g_dbus_proxy_new_sync(portal->conn, G_DBUS_PROXY_FLAGS_NONE, NULL,
+-    "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+-    "org.freedesktop.portal.ScreenCast", NULL, &err);
+-  if (err)
+-  {
+-    DEBUG_ERROR("Failed to get ScreenCast portal: %s", err->message);
+-    goto fail;
+-  }
+-
+-  return portal;
+-
++  const char * desktop = g_getenv("XDG_CURRENT_DESKTOP");
++  key = g_ascii_strdown(desktop ? desktop : "wayland", -1);
++  for (char * c = key; *c; ++c)
++    if (!g_ascii_isalnum(*c)) *c = '_';
++  directory = g_build_filename(g_get_user_config_dir(),
++    "looking-glass-linux-wayland", NULL);
++  if (g_mkdir_with_parents(directory, 0700) == 0)
++    p->tokenPath = g_strdup_printf("%s/restore-%s", directory, key);
++  return p;
+ fail:
+-  portal_free(portal);
++  DEBUG_ERROR("Cannot open desktop portal: %s",
++    error ? error->message : "missing session bus identity");
++  portal_free(p);
+   return NULL;
+ }
+-
+-void portal_free(struct Portal * portal)
+-{
+-  if (!portal)
++void portal_free(struct Portal * p)
++{
++  if (!p) return;
++  g_clear_object(&p->screenCast);
++  g_clear_object(&p->conn);
++  g_free(p->senderName);
++  g_free(p->tokenPath);
++  free(p);
++}
++static void responseCallback(GDBusConnection * connection, const char * sender,
++  const char * path, const char * interface, const char * signal,
++  GVariant * parameters, void * opaque)
++{
++  struct Request * request = opaque;
++  if (request->completed)
+     return;
+-
+-  if (portal->screenCast)
+-    g_object_unref(portal->screenCast);
+-
+-  free(portal->senderName);
+-
+-  if (portal->conn)
+-    g_object_unref(portal->conn);
+-
+-  free(portal);
+-}
+-
+-static void callbackRegister(struct Portal * portal, struct DBusCallback * data,
+-    const char * path, GDBusSignalCallback func)
+-{
+-  data->id = g_dbus_connection_signal_subscribe(portal->conn, "org.freedesktop.portal.Desktop",
++  g_variant_get(parameters, "(u@a{sv})", &request->status, &request->results);
++  request->completed = true;
++}
++static gboolean requestExpired(void * opaque)
++{
++  ((struct Request *)opaque)->expired = true;
++  return G_SOURCE_REMOVE;
++}
++
++/* Subscribe before making the call: fast portal replies must not be missed.
++ * Each request has a unique token; cancellation/failure never waits forever. */
++static GVariant * request(struct Portal * p, const char * method,
++  const char * session, GVariantBuilder * options)
++{
++  g_autoptr(GError) error = NULL;
++  g_autoptr(GVariant) reply = NULL;
++  g_autofree char * token = g_strdup_printf("lg%u_%u", (unsigned)getpid(), ++p->serial);
++  g_autofree char * path = g_strdup_printf(PORTAL_PATH "/request/%s/%s",
++    p->senderName, token);
++  struct Request state = {0};
++  guint subscription = g_dbus_connection_signal_subscribe(p->conn, PORTAL_NAME,
+     "org.freedesktop.portal.Request", "Response", path, NULL,
+-    G_DBUS_SIGNAL_FLAGS_NO_MATCH_RULE, func, data, NULL);
+-}
+-
+-static void callbackUnregister(struct Portal * portal, struct DBusCallback * data)
+-{
+-  if (!data->id)
+-    return;
+-  g_dbus_connection_signal_unsubscribe(portal->conn, data->id);
+-}
+-
+-static bool getRequestPath(struct Portal * portal, char ** path, char ** token)
+-{
+-  static uint64_t counter = 0;
+-
+-  alloc_sprintf(token, "lg%" PRIu64, counter);
+-  if (!*token)
++    G_DBUS_SIGNAL_FLAGS_NONE, responseCallback, &state, NULL);
++  guint timeout = 0;
++  g_variant_builder_add(options, "{sv}", "handle_token", g_variant_new_string(token));
++  if (!session)
++    g_variant_builder_add(options, "{sv}", "session_handle_token", g_variant_new_string(token));
++
++  GVariant * parameters = !session ? g_variant_new("(a{sv})", options) :
++    strcmp(method, "Start") == 0 ? g_variant_new("(osa{sv})", session, "", options) :
++    g_variant_new("(oa{sv})", session, options);
++  reply = g_dbus_proxy_call_sync(p->screenCast, method, parameters,
++    G_DBUS_CALL_FLAGS_NONE, 30000, NULL, &error);
++  if (!reply)
++    goto done;
++  const char * actualPath;
++  g_variant_get(reply, "(&o)", &actualPath);
++  if (strcmp(actualPath, path) != 0)
++  {
++    DEBUG_ERROR("Portal returned an unexpected request path");
++    goto done;
++  }
++  timeout = g_timeout_add_seconds(120, requestExpired, &state);
++  while (!state.completed && !state.expired)
++    g_main_context_iteration(NULL, TRUE);
++
++done:
++  if (timeout && !state.expired)
++    g_source_remove(timeout);
++  g_dbus_connection_signal_unsubscribe(p->conn, subscription);
++  if (error || !state.completed || state.status != 0)
++  {
++    DEBUG_ERROR("Portal %s failed: %s (response %u)", method,
++      error ? error->message : state.expired ? "selection timed out" :
++      "cancelled or rejected", state.status);
++    if (!state.completed && reply)
++      g_dbus_connection_call_sync(p->conn, PORTAL_NAME, path,
++        "org.freedesktop.portal.Request", "Close", NULL, NULL,
++        G_DBUS_CALL_FLAGS_NONE, 5000, NULL, NULL);
++    g_clear_pointer(&state.results, g_variant_unref);
++  }
++  return state.results;
++}
++bool portal_createScreenCastSession(struct Portal * p, char ** handle)
++{
++  *handle = NULL;
++  GVariantBuilder options;
++  g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
++  g_autoptr(GVariant) result = request(p, "CreateSession", NULL, &options);
++  return result && g_variant_lookup(result, "session_handle", "o", handle);
++}
++void portal_destroySession(struct Portal * p, char ** handle)
++{
++  if (!handle || !*handle) return;
++  g_dbus_connection_call_sync(p->conn, PORTAL_NAME, *handle,
++    "org.freedesktop.portal.Session", "Close", NULL, NULL,
++    G_DBUS_CALL_FLAGS_NONE, 5000, NULL, NULL);
++  g_clear_pointer(handle, g_free);
++}
++bool portal_selectSource(struct Portal * p, const char * session)
++{
++  g_autoptr(GVariant) version = g_dbus_proxy_get_cached_property(p->screenCast,
++    "version");
++  g_autofree char * token = NULL;
++  g_autoptr(GVariant) modes = g_dbus_proxy_get_cached_property(p->screenCast,
++    "AvailableCursorModes");
++  if (!modes || !(g_variant_get_uint32(modes) & 2))
++  {
++    DEBUG_ERROR("The portal must support an embedded cursor (KDE/GNOME)");
+     return false;
+-
+-  alloc_sprintf(path, "/org/freedesktop/portal/desktop/request/%s/lg%" PRIu64,
+-    portal->senderName, counter);
+-  if (!path)
+-  {
+-    free(*token);
+-    *token = NULL;
+-    return false;
+-  }
+-
+-  return true;
+-}
+-
+-static bool getSessionToken(char ** token)
+-{
+-  static uint64_t counter = 0;
+-
+-  alloc_sprintf(token, "lg%" PRIu64, counter);
+-  return !!*token;
+-}
+-
+-static void createSessionCallback(GDBusConnection * conn, const char * senderName,
+-  const char *objectPath, const char * interfaceName, const char * signalName,
+-  GVariant * params, void * opaque)
+-{
+-  struct DBusCallback * callback = opaque;
+-  uint32_t status;
+-  g_autoptr(GVariant) result = NULL;
+-  g_variant_get(params, "(u@a{sv})", &status, &result);
+-
+-  if (status != 0)
+-    DEBUG_ERROR("Failed to create ScreenCast: %" PRIu32, status);
+-  else
+-    g_variant_lookup(result, "session_handle", "s", callback->opaque);
+-
+-  callback->completed = true;
+-}
+-
+-bool portal_createScreenCastSession(struct Portal * portal, char ** handle)
+-{
+-  g_autoptr(GError) err = NULL;
+-  char * requestPath = NULL;
+-  char * requestToken = NULL;
+-  char * sessionToken = NULL;
+-  bool result = false;
+-  struct DBusCallback callback = {0, .opaque = handle};
+-
+-  if (!getRequestPath(portal, &requestPath, &requestToken))
+-  {
+-    DEBUG_ERROR("Failed to get request path and token");
+-    goto cleanup;
+-  }
+-
+-  if (!getSessionToken(&sessionToken))
+-  {
+-    DEBUG_ERROR("Failed to get session token");
+-    goto cleanup;
+-  }
+-
+-  *handle = NULL;
+-  callbackRegister(portal, &callback, requestPath, createSessionCallback);
+-
+-  GVariantBuilder builder;
+-  g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+-  g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string(requestToken));
+-  g_variant_builder_add(&builder, "{sv}", "session_handle_token", g_variant_new_string(sessionToken));
+-
+-  g_autoptr(GVariant) response = g_dbus_proxy_call_sync(portal->screenCast, "CreateSession",
+-    g_variant_new("(a{sv})", &builder), G_DBUS_CALL_FLAGS_NONE, -1, NULL, &err);
+-
+-  if (err)
+-  {
+-    DEBUG_ERROR("Failed to create ScreenCast session: %s", err->message);
+-    goto cleanup;
+-  }
+-
+-  while (!callback.completed)
+-    g_main_context_iteration(NULL, TRUE);
+-
+-  if (*handle)
+-    result = true;
+-
+-cleanup:
+-  callbackUnregister(portal, &callback);
+-  free(requestPath);
+-  free(requestToken);
+-  free(sessionToken);
+-  return result;
+-}
+-
+-void portal_destroySession(struct Portal * portal, char ** sessionHandle)
+-{
+-  if (!*sessionHandle)
+-    return;
+-
+-  g_dbus_connection_call_sync(portal->conn, "org.freedesktop.portal.Desktop",
+-    *sessionHandle, "org.freedesktop.portal.Session", "Close", NULL, NULL,
+-    G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL);
+-  g_free(*sessionHandle);
+-  sessionHandle = NULL;
+-}
+-
+-static void selectSourceCallback(GDBusConnection * conn, const char * senderName,
+-  const char *objectPath, const char * interfaceName, const char * signalName,
+-  GVariant * params, void * opaque)
+-{
+-  struct DBusCallback * callback = opaque;
+-  uint32_t status;
+-  g_autoptr(GVariant) result = NULL;
+-  g_variant_get(params, "(u@a{sv})", &status, &result);
+-
+-  if (status != 0)
+-    DEBUG_ERROR("Failed select sources: %" PRIu32, status);
+-  else
+-    callback->opaque = (void *) 1;
+-
+-  callback->completed = true;
+-}
+-
+-bool portal_selectSource(struct Portal * portal, const char * sessionHandle)
+-{
+-  g_autoptr(GError) err = NULL;
+-  bool result = false;
+-  char * requestPath = NULL;
+-  char * requestToken = NULL;
+-  struct DBusCallback callback = {0};
+-
+-  if (!getRequestPath(portal, &requestPath, &requestToken))
+-  {
+-    DEBUG_ERROR("Failed to get request path and token");
+-    goto cleanup;
+-  }
+-
+-  callbackRegister(portal, &callback, requestPath, selectSourceCallback);
+-
+-  GVariantBuilder builder;
+-  g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+-  g_variant_builder_add(&builder, "{sv}", "types", g_variant_new_uint32(PIPEWIRE_CAPTURE_DESKTOP));
+-  g_variant_builder_add(&builder, "{sv}", "multiple", g_variant_new_boolean(FALSE));
+-  g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string(requestToken));
+-
+-  g_autoptr(GVariant) cursorModes_ = g_dbus_proxy_get_cached_property(
+-    portal->screenCast, "AvailableCursorModes");
+-  uint32_t cursorModes = cursorModes_ ? g_variant_get_uint32(cursorModes_) : 0;
+-
+-  // TODO: support mode 4 (separate cursor)
+-  if (cursorModes & 2)
+-  {
+-    DEBUG_INFO("Cursor mode      : embedded");
+-    g_variant_builder_add(&builder, "{sv}", "cursor_mode", g_variant_new_uint32(2));
+-  }
+-  else if (cursorModes & 1)
+-  {
+-    DEBUG_INFO("Cursor mode      : none");
+-    g_variant_builder_add(&builder, "{sv}", "cursor_mode", g_variant_new_uint32(1));
+-  }
+-  else
+-  {
+-    DEBUG_ERROR("No known cursor mode found");
+-    goto cleanup;
+-  }
+-
+-  g_autoptr(GVariant) response = g_dbus_proxy_call_sync(portal->screenCast, "SelectSources",
+-    g_variant_new("(oa{sv})", sessionHandle, &builder), G_DBUS_CALL_FLAGS_NONE, -1, NULL, &err);
+-
+-  if (err)
+-  {
+-    DEBUG_ERROR("Failed to call SelectSources: %s", err->message);
+-    goto cleanup;
+-  }
+-
+-  while (!callback.completed)
+-    g_main_context_iteration(NULL, TRUE);
+-
+-  result = callback.opaque;
+-
+-cleanup:
+-  callbackUnregister(portal, &callback);
+-  free(requestPath);
+-  free(requestToken);
+-  return result;
+-}
+-
+-static void pipewireNodeCallback(GDBusConnection * conn, const char * senderName,
+-  const char *objectPath, const char * interfaceName, const char * signalName,
+-  GVariant * params, void * opaque)
+-{
+-  struct DBusCallback * callback = opaque;
+-  callback->completed = true;
+-
+-  uint32_t status;
+-  g_autoptr(GVariant) result = NULL;
+-  g_variant_get(params, "(u@a{sv})", &status, &result);
+-
+-  if (status != 0)
+-  {
+-    DEBUG_ERROR("Failed start screencast: %" PRIu32, status);
+-    return;
+-  }
+-
+-  g_autoptr(GVariant) streams = g_variant_lookup_value(result, "streams", G_VARIANT_TYPE_ARRAY);
+-
+-  GVariantIter iter;
+-  g_variant_iter_init(&iter, streams);
+-  size_t count = g_variant_iter_n_children(&iter);
+-
+-  if (count != 1)
+-  {
+-    DEBUG_WARN("Received more than one stream, discarding all but last one");
+-    while (count-- > 1)
+-    {
+-      g_autoptr(GVariant) prop = NULL;
+-      uint32_t node;
+-      g_variant_iter_loop(&iter, "(u@a{sv})", &node, &prop);
+-    }
+-  }
+-
+-  g_autoptr(GVariant) prop = NULL;
+-  g_variant_iter_loop(&iter, "(u@a{sv})", callback->opaque, &prop);
+-}
+-
+-uint32_t portal_getPipewireNode(struct Portal * portal, const char * sessionHandle)
+-{
+-  g_autoptr(GError) err = NULL;
+-  char * requestPath = NULL;
+-  char * requestToken = NULL;
+-  uint32_t result = 0;
+-  struct DBusCallback callback = {0, .opaque = &result};
+-
+-  if (!getRequestPath(portal, &requestPath, &requestToken))
+-  {
+-    DEBUG_ERROR("Failed to get request path and token");
+-    goto cleanup;
+-  }
+-
+-  callbackRegister(portal, &callback, requestPath, pipewireNodeCallback);
+-
+-  GVariantBuilder builder;
+-  g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+-  g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string(requestToken));
+-
+-  g_autoptr(GVariant) response = g_dbus_proxy_call_sync(portal->screenCast, "Start",
+-    g_variant_new("(osa{sv})", sessionHandle, "", &builder), G_DBUS_CALL_FLAGS_NONE, -1, NULL, &err);
+-
+-  if (err)
+-  {
+-    DEBUG_ERROR("Failed to call Start on session: %s", err->message);
+-    goto cleanup;
+-  }
+-
+-  while (!callback.completed)
+-    g_main_context_iteration(NULL, TRUE);
+-
+-cleanup:
+-  callbackUnregister(portal, &callback);
+-  free(requestPath);
+-  free(requestToken);
+-  return result;
+-}
+-
+-int portal_openPipewireRemote(struct Portal * portal, const char * sessionHandle)
+-{
+-  g_autoptr(GError) err = NULL;
+-  g_autoptr(GUnixFDList) fdList = NULL;
+-
+-  GVariantBuilder builder;
+-  g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+-
+-  g_autoptr(GVariant) response = g_dbus_proxy_call_with_unix_fd_list_sync(portal->screenCast,
+-    "OpenPipeWireRemote", g_variant_new("(oa{sv})", sessionHandle, &builder),
+-    G_DBUS_CALL_FLAGS_NONE, -1, NULL, &fdList, NULL, &err);
+-
+-  if (err)
+-  {
+-    DEBUG_ERROR("Failed to call OpenPipeWireRemote on session: %s", err->message);
++  }
++  GVariantBuilder options;
++  g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
++  g_variant_builder_add(&options, "{sv}", "types", g_variant_new_uint32(1));
++  g_variant_builder_add(&options, "{sv}", "multiple", g_variant_new_boolean(FALSE));
++  g_variant_builder_add(&options, "{sv}", "cursor_mode", g_variant_new_uint32(2));
++  if (version && g_variant_get_uint32(version) >= 4 && p->tokenPath)
++  {
++    g_variant_builder_add(&options, "{sv}", "persist_mode", g_variant_new_uint32(2));
++    gsize length = 0;
++    if (g_file_get_contents(p->tokenPath, &token, &length, NULL) &&
++        length > 0 && length < 4096 && g_utf8_validate(token, length, NULL))
++      g_variant_builder_add(&options, "{sv}", "restore_token", g_variant_new_string(token));
++  }
++  g_autoptr(GVariant) result = request(p, "SelectSources", session, &options);
++  return result != NULL;
++}
++uint32_t portal_getPipewireNode(struct Portal * p, const char * session)
++{
++  GVariantBuilder options;
++  g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
++  g_autoptr(GVariant) result = request(p, "Start", session, &options);
++  g_autoptr(GVariant) streams = result ? g_variant_lookup_value(result,
++    "streams", G_VARIANT_TYPE("a(ua{sv})")) : NULL;
++  g_autoptr(GVariant) properties = NULL;
++  g_autofree char * token = NULL;
++  uint32_t node = 0;
++  if (!streams || !g_variant_n_children(streams))
++  {
++    DEBUG_ERROR("Portal returned no monitor stream");
++    return 0;
++  }
++  g_variant_get_child(streams, 0, "(u@a{sv})", &node, &properties);
++  if (p->tokenPath && g_variant_lookup(result, "restore_token", "s", &token))
++  {
++    g_autoptr(GError) error = NULL;
++    if (!g_file_set_contents_full(p->tokenPath, token, -1,
++          G_FILE_SET_CONTENTS_CONSISTENT | G_FILE_SET_CONTENTS_DURABLE,
++          0600, &error))
++      DEBUG_WARN("Cannot save portal selection: %s", error->message);
++  }
++  return node;
++}
++int portal_openPipewireRemote(struct Portal * p, const char * session)
++{
++  g_autoptr(GError) error = NULL;
++  g_autoptr(GUnixFDList) fds = NULL;
++  GVariantBuilder options;
++  g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
++  g_autoptr(GVariant) response = g_dbus_proxy_call_with_unix_fd_list_sync(
++    p->screenCast, "OpenPipeWireRemote", g_variant_new("(oa{sv})", session, &options),
++    G_DBUS_CALL_FLAGS_NONE, 30000, NULL, &fds, NULL, &error);
++  if (!response)
++  {
++    DEBUG_ERROR("Cannot open PipeWire remote: %s", error->message);
+     return -1;
+   }
+-
+   gint32 index;
+-  g_variant_get(response, "(h)", &index, &err);
+-  if (err)
+-  {
+-    DEBUG_ERROR("Failed to get pipewire fd index: %s", err->message);
+-    return -1;
+-  }
+-
+-  int fd = g_unix_fd_list_get(fdList, index, &err);
+-  if (err)
+-  {
+-    DEBUG_ERROR("Failed to get pipewire fd: %s", err->message);
+-    return -1;
+-  }
+-
++  g_variant_get(response, "(h)", &index);
++  int fd = g_unix_fd_list_get(fds, index, &error);
++  if (fd < 0)
++    DEBUG_ERROR("Cannot get PipeWire descriptor: %s", error->message);
+   return fd;
+ }

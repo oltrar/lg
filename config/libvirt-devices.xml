@@ -1,0 +1,17 @@
+<!-- Merge these with the Linux VM's existing <devices>. This is NOT a
+     complete domain definition. Replace existing matching elements. -->
+<devices>
+  <shmem name='looking-glass-linux'>
+    <model type='ivshmem-plain'/>
+    <size unit='M'>128</size>
+  </shmem>
+  <graphics type='spice' port='5901' autoport='no'>
+    <listen type='address' address='127.0.0.1'/>
+    <mouse mode='server'/>
+  </graphics>
+  <!-- Final operating configuration: prevents SPICE display fallback.
+       Make this change AFTER initial portal setup and verification. -->
+  <video><model type='none'/></video>
+  <sound model='ich9'/>
+  <audio id='1' type='spice'/>
+</devices>

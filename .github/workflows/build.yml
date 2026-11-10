@@ -1,0 +1,17 @@
+name: Linux guest build
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  arch:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - run: pacman -Syu --noconfirm git cmake ninja pkgconf pipewire glib2
+      - uses: actions/checkout@v4
+      - run: bash build.sh
+  debian:
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    steps:
+      - run: apt-get update && apt-get install -y git ca-certificates build-essential cmake ninja-build pkg-config libpipewire-0.3-dev libglib2.0-dev
+      - uses: actions/checkout@v4
+      - run: bash build.sh

@@ -51,8 +51,8 @@ bash build.sh
 When reviewing an unmerged PR, check out its branch before running `build.sh`.
 
 The script fetches upstream B7 commit
-`27fe47cbe2a3a8da986d310ab866f0b646ed68f5`, initializes its pinned LGMP
-dependency, applies the included source overlay, runs the frame tests, and
+`27fe47cbe2a3a8da986d310ab866f0b646ed68f5`, initializes its pinned submodules
+(required by B7's configure checks), applies the source overlay, runs the tests, and
 builds only the Linux guest host with PipeWire capture. It does not replace
 your client, install system files or change the VM configuration.
 

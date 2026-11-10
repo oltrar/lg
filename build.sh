@@ -17,7 +17,8 @@ fi
 [[ $(git -C "$SRC" rev-parse HEAD) == "$LG_COMMIT" ]] || {
   printf 'Unexpected upstream revision; use the pinned B7 source.\n' >&2; exit 1;
 }
-git -C "$SRC" submodule update --init --recursive repos/LGMP
+# B7's configure-time checks require all pinned submodules even for host-only builds.
+git -C "$SRC" submodule update --init --recursive
 
 # Preserve edits that are neither the pinned upstream nor this overlay.
 while IFS= read -r -d '' overlay; do

@@ -224,10 +224,9 @@ use SPICE. The NVIDIA GPU renders in the guest; this does not require NvFBC,
 NVENC or a professional NVIDIA card.
 
 **Status:** experimental source project, not a production-validated replacement
-for the Windows guest software. The modified capture and portal translation
-units were cross-compiled to Linux x86-64 objects with strict warnings, and
-frame-layout tests were executed. A full native Linux build, the guest kernel
-module, and actual KDE/GNOME/NVIDIA/IVSHMEM integration still need validation in
+for the Windows guest software. Native Arch and Debian CI compile and link the
+complete guest application and execute both test suites. The guest kernel
+module and actual KDE/GNOME/NVIDIA/IVSHMEM integration still need validation in
 your VM. Read `VALIDATION.md` for the exact evidence and limits.
 
 ## What is implemented

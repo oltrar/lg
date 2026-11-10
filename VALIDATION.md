@@ -26,14 +26,29 @@ NVIDIA GPU passthrough, and an existing B7 client.
 - Checked the archive contents against the source files and their SHA-256
   manifest.
 
-## Checks that still require Linux / the actual VM
+## Native Linux CI
+
+On implementation commit `ebd9bcc8345758d78ba905bbf07f91b3925c2892`,
+the [PR workflow](https://github.com/oltrar/lg/actions/runs/42887642488)
+passed both jobs:
+
+- Arch Linux: complete guest application compilation/link and both test suites.
+- Debian bookworm: complete guest application compilation/link and both test suites.
+
+This includes native execution of the backend frame-publication tests described
+above. The build fetches every pinned B7 submodule because upstream's configure
+checks require them even for host-only builds.
+
+## Checks that still require the actual VM
 
 The execution environment here is Windows and has no installed Linux runtime,
 Wayland compositor, passed-through VM GPU, IVSHMEM device or usable Linux guest.
-Consequently **a complete application link/native build, KVMFR kernel build,
-portal request execution and end-to-end display/input/audio tests were not
-performed**. The source object checks do not establish runtime correctness,
-performance or compatibility with current CachyOS kernels or NVIDIA drivers.
+The local environment could not perform a native build; CI subsequently
+validated the complete user-space application build as recorded above.
+**KVMFR kernel builds, portal request execution and end-to-end display/input/
+audio tests remain unverified.** Build and unit-test success do not establish
+runtime correctness, performance or compatibility with current CachyOS kernels
+or NVIDIA drivers.
 
 The included GitHub Actions workflow runs native Arch and Debian build
 checks on pushes and pull requests. The checks above describe the local

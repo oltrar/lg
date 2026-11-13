@@ -1,0 +1,298 @@
+/**
+ * Looking Glass
+ * Copyright © 2017-2025 The Looking Glass Authors
+ * https://looking-glass.io
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation; either version 2 of the License, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+ * more details.
+ *
+ * You should have received a copy of the GNU General Public License along
+ * with this program; if not, write to the Free Software Foundation, Inc., 59
+ * Temple Place, Suite 330, Boston, MA 02111-1307 USA
+ */
+
+#include "common/ivshmem.h"
+#include "ivshmem_pci.h"
+
+#include <dirent.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <limits.h>
+
+#include "common/array.h"
+#include "common/debug.h"
+#include "common/option.h"
+#include "common/sysinfo.h"
+#include "common/stringutils.h"
+#include "module/kvmfr.h"
+
+struct IVSHMEMInfo
+{
+  int  devFd;
+  int  size;
+  bool hasDMA;
+};
+
+static bool ivshmemDeviceValidator(struct Option * opt, const char ** error)
+{
+  if (!strcmp(opt->value.x_string, "ivshmem") ||
+      !strncmp(opt->value.x_string, "ivshmem:", 8))
+    return true;
+  // if it's not a kvmfr device, it must be a file on disk
+  if (strlen(opt->value.x_string) > 3 && memcmp(opt->value.x_string, "kvmfr", 5) != 0)
+  {
+    struct stat st;
+    if (stat(opt->value.x_string, &st) != 0)
+    {
+      *error = "Invalid path to the ivshmem file specified";
+      return false;
+    }
+    return true;
+  }
+
+  return true;
+}
+
+static StringList ivshmemDeviceGetValues(struct Option * option)
+{
+  StringList sl = stringlist_new(true);
+  stringlist_push(sl, strdup("ivshmem"));
+
+  DIR * d = opendir("/sys/class/kvmfr");
+  if (!d)
+    return sl;
+
+  struct dirent * dir;
+  while((dir = readdir(d)) != NULL)
+  {
+    if (dir->d_name[0] == '.')
+      continue;
+
+    char * devName;
+    alloc_sprintf(&devName, "/dev/%s", dir->d_name);
+    stringlist_push(sl, devName);
+  }
+
+  closedir(d);
+  return sl;
+}
+
+void ivshmemOptionsInit(void)
+{
+  char * shmFile;
+
+  // This project builds the Linux guest Host Application. Prefer direct PCI
+  // IVSHMEM; KVMFR and ordinary shared-memory files remain explicit choices.
+  shmFile = "ivshmem";
+
+  struct Option options[] =
+  {
+    {
+      .module         = "app",
+      .name           = "shmFile",
+      .shortopt       = 'f',
+      .description    = "ivshmem (auto PCI BAR2), ivshmem:DOMAIN:BUS:SLOT.FUNCTION, /dev/kvmfrN, or a shared-memory file",
+      .type           = OPTION_TYPE_STRING,
+      .value.x_string = shmFile,
+      .validator      = ivshmemDeviceValidator,
+      .getValues      = ivshmemDeviceGetValues
+    },
+    {0}
+  };
+
+  option_register(options);
+}
+
+bool ivshmemInit(struct IVSHMEM * dev)
+{
+  // FIXME: split code from ivshmemOpen
+  return true;
+}
+
+bool ivshmemOpen(struct IVSHMEM * dev)
+{
+  return ivshmemOpenDev(dev, option_get_string("app", "shmFile"));
+}
+
+bool ivshmemOpenDev(struct IVSHMEM * dev, const char * shmDevice)
+{
+  DEBUG_ASSERT(dev);
+
+  int devSize;
+  int devFd;
+  bool hasDMA;
+  struct LGPciMapping pci;
+  bool isPCI = !strcmp(shmDevice, "ivshmem") || !strncmp(shmDevice, "ivshmem:", 8);
+
+  dev->opaque = NULL;
+
+  DEBUG_INFO("Shared memory    : %s", shmDevice);
+
+  if (isPCI)
+  {
+    const char * address = shmDevice[7] == ':' ? shmDevice + 8 : NULL;
+    char error[256];
+    if ((address && !*address) ||
+        !lgPciResolve("/sys/bus/pci/devices", address, &pci, error, sizeof(error)))
+    {
+      DEBUG_ERROR("%s", address && !*address ? "An explicit IVSHMEM PCI address must not be empty" : error);
+      return false;
+    }
+    shmDevice = pci.path;
+    DEBUG_INFO("PCI IVSHMEM BAR2 : %s (%zu MiB)", shmDevice, pci.size / 1048576);
+  }
+
+  if (strlen(shmDevice) > 8 && memcmp(shmDevice, "/dev/kvmfr", 10) == 0)
+  {
+    devFd = open(shmDevice, O_RDWR | O_CLOEXEC, (mode_t)0600);
+    if (devFd < 0)
+    {
+      DEBUG_ERROR("Failed to open: %s", shmDevice);
+      DEBUG_ERROR("%s", strerror(errno));
+      return false;
+    }
+
+    // get the device size
+    devSize = ioctl(devFd, KVMFR_DMABUF_GETSIZE, 0);
+    if (devSize < 0)
+    {
+      DEBUG_ERROR("Failed to get the device size");
+      close(devFd);
+      return false;
+    }
+    hasDMA = true;
+  }
+  else
+  {
+    devFd = open(shmDevice, O_RDWR | O_CLOEXEC, (mode_t)0600);
+    if (devFd < 0)
+    {
+      DEBUG_ERROR("Failed to open: %s", shmDevice);
+      DEBUG_ERROR("%s", strerror(errno));
+      return false;
+    }
+
+    struct stat st;
+    if (fstat(devFd, &st) != 0)
+    {
+      DEBUG_ERROR("Failed to stat: %s", shmDevice);
+      DEBUG_ERROR("%s", strerror(errno));
+      close(devFd);
+      return false;
+    }
+
+    if (!isPCI && (st.st_size <= 0 || st.st_size > INT_MAX))
+    {
+      DEBUG_ERROR("Invalid shared-memory file size");
+      close(devFd);
+      return false;
+    }
+    devSize = isPCI ? (int)pci.size : (int)st.st_size;
+    hasDMA  = false;
+  }
+
+  void * map = mmap(0, devSize, PROT_READ | PROT_WRITE, MAP_SHARED, devFd, 0);
+  if (map == MAP_FAILED)
+  {
+    DEBUG_ERROR("Failed to map the shared memory device: %s", shmDevice);
+    DEBUG_ERROR("%s", strerror(errno));
+    if (isPCI)
+      DEBUG_ERROR("Check guest PCI resource permissions and kernel lockdown policy; KVMFR is an optional alternative");
+    close(devFd);
+    return false;
+  }
+
+  struct IVSHMEMInfo * info = malloc(sizeof(*info));
+  if (!info)
+  {
+    munmap(map, devSize);
+    close(devFd);
+    return false;
+  }
+  info->size   = devSize;
+  info->devFd  = devFd;
+  info->hasDMA = hasDMA;
+
+  dev->opaque = info;
+  dev->size   = devSize;
+  dev->mem    = map;
+  return true;
+}
+
+void ivshmemClose(struct IVSHMEM * dev)
+{
+  DEBUG_ASSERT(dev);
+
+  if (!dev->opaque)
+    return;
+
+  struct IVSHMEMInfo * info =
+    (struct IVSHMEMInfo *)dev->opaque;
+
+  munmap(dev->mem, info->size);
+  close(info->devFd);
+
+  free(info);
+  dev->mem    = NULL;
+  dev->size   = 0;
+  dev->opaque = NULL;
+}
+
+void ivshmemFree(struct IVSHMEM * dev)
+{
+  // FIXME: split code from ivshmemClose
+}
+
+bool ivshmemHasDMA(struct IVSHMEM * dev)
+{
+  DEBUG_ASSERT(dev && dev->opaque);
+
+  struct IVSHMEMInfo * info =
+    (struct IVSHMEMInfo *)dev->opaque;
+
+  return info->hasDMA;
+}
+
+int ivshmemGetDMABuf(struct IVSHMEM * dev, uint64_t offset, uint64_t size)
+{
+  DEBUG_ASSERT(ivshmemHasDMA(dev));
+  DEBUG_ASSERT(dev && dev->opaque);
+  DEBUG_ASSERT(offset + size <= dev->size);
+
+  static long pageSize = 0;
+
+  if (!pageSize)
+    pageSize = sysinfo_getPageSize();
+
+  struct IVSHMEMInfo * info =
+    (struct IVSHMEMInfo *)dev->opaque;
+
+  // align to the page size
+  size = ALIGN_PAD(size, pageSize);
+
+  const struct kvmfr_dmabuf_create create =
+  {
+    .flags  = KVMFR_DMABUF_FLAG_CLOEXEC,
+    .offset = offset,
+    .size   = size
+  };
+
+  int fd = ioctl(info->devFd, KVMFR_DMABUF_CREATE, &create);
+  if (fd < 0)
+    DEBUG_ERROR("Failed to create the dma buffer");
+
+  return fd;
+}

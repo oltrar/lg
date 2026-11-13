@@ -9,11 +9,23 @@ printf '\nKVMFR devices:\n'
 find /dev -maxdepth 1 -name 'kvmfr*' -exec ls -l {} \;
 printf '\nKVMFR static allocation parameter (should be empty/zero in the guest):\n'
 cat /sys/module/kvmfr/parameters/static_size_mb 2>/dev/null || true
+printf '\nPreferred raw IVSHMEM devices (no KVMFR required):\n'
+for device in /sys/bus/pci/devices/*; do
+  [[ -f $device/vendor && -f $device/device ]] || continue
+  [[ $(<"$device/vendor") == 0x1af4 && $(<"$device/device") == 0x1110 ]] || continue
+  printf '\n%s\n' "${device##*/}"
+  printf 'enabled: '; cat "$device/enable"
+  printf 'driver: '; readlink "$device/driver" 2>/dev/null || printf 'none\n'
+  ls -l "$device/resource2" 2>/dev/null || true
+  printf 'BAR2 resource: '; sed -n '3p' "$device/resource"
+done
+printf '\nGuest kernel lockdown status:\n'
+cat /sys/kernel/security/lockdown 2>/dev/null || true
 printf '\nDesktop portal and PipeWire services:\n'
 systemctl --user --no-pager status pipewire.service xdg-desktop-portal.service 2>/dev/null || true
 printf '\nPortal capture properties:\n'
 command -v gdbus >/dev/null && gdbus introspect --session \
   --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop \
   2>/dev/null | sed -n '/interface org.freedesktop.portal.ScreenCast/,/^  };/p'
-printf '\nRunning-kernel headers:\n'
+printf '\nRunning-kernel headers (only needed for optional KVMFR):\n'
 ls -ld "/usr/lib/modules/$(uname -r)/build" 2>/dev/null || true

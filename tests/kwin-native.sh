@@ -7,10 +7,10 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 if [[ ${1:-} != --inner ]]; then exec dbus-run-session -- bash "$0" --inner; fi
 FIXTURE=$(mktemp -d)
 cleanup() {
-  for process in "${HOST_PID:-}" "${KWIN_PID:-}" "${WP_PID:-}" "${PW_PID:-}"; do
+  for process in "${HOST_PID:-}" "${SCENE_PID:-}" "${KWIN_PID:-}" "${WP_PID:-}" "${PW_PID:-}"; do
     [[ -z $process ]] || kill "$process" 2>/dev/null || true
   done
-  for process in "${HOST_PID:-}" "${KWIN_PID:-}" "${WP_PID:-}" "${PW_PID:-}"; do
+  for process in "${HOST_PID:-}" "${SCENE_PID:-}" "${KWIN_PID:-}" "${WP_PID:-}" "${PW_PID:-}"; do
     [[ -z $process ]] || wait "$process" 2>/dev/null || true
   done
   rm -rf -- "$FIXTURE"
@@ -53,16 +53,20 @@ for boot in 1 2; do
   done
   if (( ! ready )); then cat "$FIXTURE/kwin.log" "$FIXTURE/list.log" 2>/dev/null || true; exit 1; fi
   if [[ -z $connector ]]; then IFS=$'\t' read -r connector rest < "$FIXTURE/outputs"; fi
+  # A bare compositor has no desktop/surfaces to repaint. Supply a real animated
+  # Wayland SHM client so screen capture has visible changing content.
+  weston-simple-shm > "$FIXTURE/scene.log" 2>&1 & SCENE_PID=$!
   truncate -s 0 "$FIXTURE/shm"; truncate -s 64M "$FIXTURE/shm"
   "$ROOT/_build/host/looking-glass-host" "app:shmFile=$FIXTURE/shm" app:capture=pipewire \
     "pipewire:kdeOutput=$connector" > "$FIXTURE/host.log" 2>&1 & HOST_PID=$!
   if ! "$ROOT/_build/lg-frame-check" "$FIXTURE/shm" 30; then
-    cat "$FIXTURE/host.log" "$FIXTURE/kwin.log" "$FIXTURE/pipewire.log" "$FIXTURE/wireplumber.log"; exit 1
+    cat "$FIXTURE/host.log" "$FIXTURE/kwin.log" "$FIXTURE/pipewire.log" "$FIXTURE/wireplumber.log" "$FIXTURE/scene.log"; exit 1
   fi
   kill -INT "$HOST_PID"
   code=0; wait "$HOST_PID" || code=$?
   [[ $code == 16 ]] || { cat "$FIXTURE/host.log"; exit 1; }
   HOST_PID=''
+  kill "$SCENE_PID"; wait "$SCENE_PID" || true; SCENE_PID=''
   kill "$KWIN_PID"; wait "$KWIN_PID" || true; KWIN_PID=''
   printf 'PASS: real KWin native capture and B7 frame after compositor boot %s (permissions enabled)\n' "$boot"
 done

@@ -17,7 +17,7 @@
 #define PATH "/org/freedesktop/portal/desktop"
 #define SESSION PATH "/session/test/session"
 
-enum ResponseMode { NORMAL, MISSING, WRONG_TYPE, INVALID_PATH, CANCEL, CANCEL_START, NO_STREAM };
+enum ResponseMode { NORMAL, MISSING, WRONG_TYPE, INVALID_PATH, CANCEL, CANCEL_START, NO_STREAM, NO_RESTORE };
 struct Server
 {
   const char * address;
@@ -104,7 +104,7 @@ static void method(GDBusConnection * conn, const char * sender, const char * pat
   g_variant_builder_init(&results, G_VARIANT_TYPE_VARDICT);
   int responseMode = g_atomic_int_get(&server->mode);
   if (create && (responseMode == NORMAL || responseMode == CANCEL_START ||
-                 responseMode == NO_STREAM))
+                 responseMode == NO_STREAM || responseMode == NO_RESTORE))
     g_variant_builder_add(&results, "{sv}", "session_handle", g_variant_new_string(SESSION));
   else if (create && responseMode == WRONG_TYPE)
     g_variant_builder_add(&results, "{sv}", "session_handle", g_variant_new_uint32(42));
@@ -119,8 +119,9 @@ static void method(GDBusConnection * conn, const char * sender, const char * pat
     g_variant_builder_add(&props, "{sv}", "size", g_variant_new("(ii)", 1920, 1080));
     g_variant_builder_add(&streams, "(ua{sv})", 42u, &props);
     g_variant_builder_add(&results, "{sv}", "streams", g_variant_builder_end(&streams));
-    g_variant_builder_add(&results, "{sv}", "restore_token", g_variant_new_string(
-      g_atomic_int_get(&server->generation) ? "rotated-nvidia-token" : "new-nvidia-token"));
+    if (responseMode != NO_RESTORE)
+      g_variant_builder_add(&results, "{sv}", "restore_token", g_variant_new_string(
+        g_atomic_int_get(&server->generation) ? "rotated-nvidia-token" : "new-nvidia-token"));
   }
   /* Reply promptly, as a real portal does. Signals are deliberately emitted
    * immediately afterward to test subscribe-before-call handling. */
@@ -274,6 +275,17 @@ int main(int argc, char ** argv)
   assert(g_file_get_contents(tokenPath, &saved, NULL, NULL));
   assert(!strcmp(saved, "rotated-nvidia-token"));
 
+  /* If persistence is denied, a successful fresh choice must forget QXL.
+   * Keeping its still-unused token could silently switch back on next login. */
+  assert(g_file_set_contents(tokenPath, "old-qxl-token", -1, NULL));
+  g_atomic_int_set(&server.expectedToken, 0);
+  g_atomic_int_set(&server.mode, NO_RESTORE);
+  assert(portal_createScreenCastSession(portal, &handle));
+  assert(portal_selectSource(portal, handle, false));
+  assert(portal_getPipewireNode(portal, handle) == 42);
+  portal_destroySession(portal, &handle);
+  assert(!g_file_test(tokenPath, G_FILE_TEST_EXISTS));
+
   for (int mode = MISSING; mode <= CANCEL; ++mode)
   {
     g_atomic_int_set(&server.mode, mode);
@@ -289,10 +301,9 @@ int main(int argc, char ** argv)
   g_mutex_clear(&server.mutex);
   g_test_dbus_down(bus);
   g_clear_pointer(&saved, g_free);
-  assert(g_remove(tokenPath) == 0);
   g_autofree char * directory = g_path_get_dirname(tokenPath);
   assert(g_rmdir(directory) == 0);
   assert(g_rmdir(config) == 0);
-  puts("PASS: portal lifecycle, FD transfer, fresh monitor choice, token replacement/rotation and cancelled-choice preservation");
+  puts("PASS: portal lifecycle, FD transfer, fresh monitor choice, token rotation, denied persistence and cancelled-choice preservation");
   return 0;
 }

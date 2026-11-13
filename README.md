@@ -257,7 +257,9 @@ While QXL is still available:
    capture in the foreground with a **fresh monitor-selection request**. Choose
    the NVIDIA/dummy-plug monitor in the guest sharing dialog, rather than QXL's
    virtual monitor. The old restore token is omitted for this run; a successful
-   new choice replaces it. Cancelling leaves the previous saved selection intact.
+   new choice replaces it when the portal grants persistence. If persistence is
+   denied, the old selection is removed so future startup asks again instead of
+   switching back to QXL. Cancelling leaves the previous saved selection intact.
 3. Verify the LG client shows the NVIDIA output. For example, place a terminal
    on that output and confirm it appears in LG while QXL shows a different area.
    Press Ctrl+C after verifying. If startup is enabled, run:

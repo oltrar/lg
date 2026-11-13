@@ -6,6 +6,7 @@
  */
 #include "portal.h"
 #include "common/debug.h"
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -229,13 +230,19 @@ uint32_t portal_getPipewireNode(struct Portal * p, const char * session)
     return 0;
   }
   g_variant_get_child(streams, 0, "(u@a{sv})", &node, &properties);
+  if (!node)
+  {
+    DEBUG_ERROR("Portal returned an invalid monitor stream node");
+    return 0;
+  }
   const char * id = NULL;
   int width = 0, height = 0;
   g_variant_lookup(properties, "id", "&s", &id);
   g_variant_lookup(properties, "size", "(ii)", &width, &height);
   DEBUG_INFO("Portal selected stream: node %u, id %s, logical size %dx%d",
     node, id ? id : "not supplied", width, height);
-  if (p->tokenPath && g_variant_lookup(result, "restore_token", "s", &token))
+  if (p->tokenPath && g_variant_lookup(result, "restore_token", "s", &token) &&
+      token[0] && strlen(token) < 4096)
   {
     g_autoptr(GError) error = NULL;
     if (!g_file_set_contents_full(p->tokenPath, token, -1,
@@ -244,6 +251,14 @@ uint32_t portal_getPipewireNode(struct Portal * p, const char * session)
       DEBUG_WARN("Cannot save portal selection: %s", error->message);
     else
       DEBUG_INFO("Saved monitor selection for future capture startup");
+  }
+  else if (p->tokenPath)
+  {
+    /* A successful fresh choice must not leave an older monitor's token in
+     * place when persistence is denied. A used restore token is single-use too. */
+    if (g_unlink(p->tokenPath) != 0 && errno != ENOENT)
+      DEBUG_WARN("Cannot remove the previous monitor selection: %s", strerror(errno));
+    DEBUG_WARN("Portal did not grant a reusable monitor selection; next startup may ask again");
   }
   return node;
 }

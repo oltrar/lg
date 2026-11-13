@@ -12,12 +12,14 @@ Added `run-guest.sh --choose-display`, `LG_CAPTURE_RESTORE=yes|no`, and
 `setup-startup.sh choose-display`. The latter stops the managed service and
 runs the one-time chooser in the foreground. No saved restore token is sent
 for a fresh choice; a successful choice is saved for future normal startup.
-Cancellation/empty-stream responses preserve the prior token. New diagnostics
+Cancellation/empty-stream responses preserve the prior token. A successful
+choice without a reusable token removes the old selection instead of allowing
+a later switch back to QXL. New diagnostics
 report restoration, selected-stream metadata and DRM connector/GPU state.
 
 The real private-D-Bus test now checks monitor-only selection, omission of an
 existing QXL token, replacement with a new selection, subsequent restoration
-and token rotation, mode 0600, and cancellation/empty-stream preservation.
+and token rotation, denied persistence, mode 0600, and cancellation/empty-stream preservation.
 Launcher tests verify the flag, environment setting and startup chooser without
 changing saved startup preferences. Native CI results are recorded on the PR.
 Actual NVIDIA-output capture with QXL removed still needs a guest retry;

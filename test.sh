@@ -35,4 +35,5 @@ if [[ ${LG_WITH_BACKEND_TEST:-0} == 1 ]]; then
     "$ROOT/overlay/common/src/platform/linux/ivshmem_pci.c" \
     -o "$ROOT/_build/tests/ivshmem_transport_test"
   "$ROOT/_build/tests/ivshmem_transport_test"
+  bash "$ROOT/tests/startup_test.sh"
 fi

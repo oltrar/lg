@@ -1,5 +1,21 @@
 # Validation record
 
+## Optional desktop startup and user feedback — 2026-11-13
+
+The user confirmed that screen passthrough works in their CachyOS guest with
+NVIDIA passthrough after the portal parser fix. Keyboard, mouse, audio and
+concurrent host/guest microphone use have **not yet been tested by the user**.
+This report does not establish capture on both desktop environments.
+
+Added opt-in KDE/GNOME Wayland login startup using an XDG desktop entry and a
+systemd user service. Tests exercise a real GLib desktop-entry launch with
+special characters in project/config paths, systemd unit validation, scoped
+session-environment import, X11/missing-session handling, settings retention,
+unmanaged-file/symlink preservation, and root-install refusal. `systemctl`
+is mocked: these tests do not establish an actual compositor login/logout or
+reboot lifecycle. Check the startup PR's native Arch/Debian results and perform
+the README's reboot/login/logout checks in the real guest.
+
 ## Portal session startup fix — 2026-11-13
 
 Fixed the ScreenCast `CreateSession` parser: the documented `session_handle`
@@ -12,8 +28,8 @@ service: a standards-compliant string response, SelectSources/Start, Unix FD
 transfer, session close, cancellation, and missing/invalid result values.
 Build-upgrade tests cover managed source updates, migration from prior Git
 overlay versions, and refusal to overwrite local edits. See the fix PR's checks
-for native results; this still does not establish real desktop capture on
-the user's NVIDIA/KDE/GNOME setup.
+for native results. The later user report above confirms screen capture in their
+guest, but does not establish both desktop environments or other channels.
 
 ## Plain IVSHMEM update — 2026-11-13
 
@@ -82,8 +98,9 @@ The execution environment here is Windows and has no installed Linux runtime,
 Wayland compositor, passed-through VM GPU, IVSHMEM device or usable Linux guest.
 The local environment could not perform a native build; CI subsequently
 validated the complete user-space application build as recorded above.
-**KVMFR kernel builds, portal request execution and end-to-end display/input/
-audio tests remain unverified.** Build and unit-test success do not establish
+**KVMFR kernel builds and end-to-end input/audio tests remain unverified.**
+The real private-D-Bus portal test and the user's successful screen capture
+report supersede the earlier portal/display limitation. Build and unit-test success do not establish
 runtime correctness, performance or compatibility with current CachyOS kernels
 or NVIDIA drivers.
 

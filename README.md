@@ -20,7 +20,7 @@ Inside an up-to-date CachyOS/Arch **KDE Wayland guest**:
 
 ```bash
 sudo pacman -S --needed base-devel git cmake ninja pkgconf pipewire glib2 dbus \
-  xdg-desktop-portal xdg-desktop-portal-kde pciutils
+  xdg-desktop-portal xdg-desktop-portal-kde pciutils desktop-file-utils
 ```
 
 For a GNOME guest/session also install:
@@ -226,12 +226,80 @@ microphone recording; check your own escape-key customization. Captured relative
 input uses QEMU's virtual input devices and works independently of the guest's
 Wayland input-injection APIs. Adjust guest mouse acceleration if needed.
 
-Stop capture with Ctrl+C. For autostart, add `run-guest.sh` to the guest desktop's
-Autostart settings with `/usr/bin/bash`. Portal restoration remains subject to
-desktop policy. Keep the project in the same path, and run it within the
-graphical user session rather than as a root/system capture service.
+Stop manual capture with Ctrl+C. The optional startup setup below runs capture
+in your graphical user session.
 
-## 6. Verify the actual VM
+## 6. Optional: start automatically after guest login
+
+After building and confirming `bash run-guest.sh` works, run this **inside the
+guest Wayland desktop**, as your normal user, **without sudo**:
+
+```bash
+bash setup-startup.sh enable
+```
+
+Capture will start automatically at the next KDE/GNOME Wayland login, including
+after reboot. This installs a per-user XDG Autostart entry and a
+`looking-glass-host.service` **user** unit. The desktop entry imports the current
+session's Wayland/portal environment before starting the unit. The unit stops
+with the graphical session. It is intentionally not an early-boot system/root
+service: Wayland screen capture needs your logged-in desktop. If you want it to
+start without typing a login password after boot, configure desktop auto-login
+separately in your guest display manager.
+
+Enabling startup leaves your current manual capture running. To try the service
+immediately, **first stop manual capture with Ctrl+C**, then run:
+
+```bash
+bash setup-startup.sh start
+bash setup-startup.sh status
+journalctl --user -u looking-glass-host.service -b --no-pager
+```
+
+Remove any older Looking Glass entry you added manually in the desktop's
+Autostart settings, so only one capture process starts. Keep this project at
+the same path; if you move it, run `bash setup-startup.sh enable` from its new
+location. Re-running enable updates the managed startup files and keeps settings.
+
+Optional startup settings are saved in
+`${XDG_CONFIG_HOME:-$HOME/.config}/looking-glass-linux-wayland/autostart.env`:
+
+```ini
+LG_SHM=ivshmem
+LG_FPS=60
+```
+
+For example, use `LG_SHM=ivshmem:0000:09:02.0` to select a particular device and
+`LG_FPS=120` for its requested capture rate. These settings use systemd
+`EnvironmentFile` syntax, not shell commands. After editing, restart from a
+terminal in the guest desktop:
+
+```bash
+bash setup-startup.sh restart
+```
+
+Stop until the next login, or remove startup entirely:
+
+```bash
+bash setup-startup.sh stop
+bash setup-startup.sh disable
+```
+
+Disable stops the service and removes its managed desktop entry/unit, keeping
+your settings and portal restore tokens. Use `status` and the journal command
+above to inspect failures. To switch back to manual capture, stop the service
+first. The service does not automatically retry on failure or portal cancellation,
+so it will not repeatedly open permission prompts; use `restart` when ready.
+
+Startup uses the same saved per-desktop portal permission as manual capture.
+KDE/GNOME may still show a monitor chooser after login if permission cannot be
+restored, the output changes, or desktop policy requires confirmation. This does
+not capture the login/lock screen or bypass consent. Persistent IVSHMEM permissions
+from step 4 must also be installed so BAR2 remains accessible after reboot.
+One graphical session per guest user is supported; log out before switching
+between KDE and GNOME.
+
+## 7. Verify the actual VM
 
 Under **both KDE and GNOME**, using a fresh login to each:
 
@@ -252,6 +320,9 @@ Under **both KDE and GNOME**, using a fresh login to each:
 6. Restart capture/client, cancel or revoke portal access, lock/unlock, and log
    out. Verify per-desktop source restoration and clear failure handling.
 7. Keep allocations/ports separate if running Windows and Linux VMs together.
+8. With startup enabled, reboot and log in. Check that the service starts once,
+   restore/accept portal permission if prompted, and verify frames. Log out and
+   check capture stops; repeat after logging into the other desktop.
 
 Run `bash doctor.sh` in the guest for read-only diagnostics. Keep guest and
 physical-host client logs separate, and do not share the portal restore tokens
@@ -314,8 +385,10 @@ NVENC or a professional NVIDIA card.
 for the Windows guest software. Native Arch and Debian CI compile and link the
 complete guest application and execute all test suites. The
 optional KVMFR module and actual KDE/GNOME/NVIDIA desktop/audio integration
-still need validation in your VM. The default raw PCI path passed a QEMU guest
-test without KVMFR. Read `VALIDATION.md` for the exact evidence and limits.
+still need broader validation. The user has confirmed screen capture works in
+their CachyOS/NVIDIA guest with plain IVSHMEM; keyboard, mouse, sound and shared
+microphone have not yet been tested there. The default raw PCI path also passed
+a QEMU guest test without KVMFR. Read `VALIDATION.md` for evidence and limits.
 
 ## What is implemented
 
@@ -329,6 +402,8 @@ test without KVMFR. Read `VALIDATION.md` for the exact evidence and limits.
 - Bounded portal requests, cancellation handling, corrected session cleanup,
   and per-desktop portal restore tokens stored with mode 0600.
 - Scripts, a separate Linux-VM client configuration, VM XML examples and tests.
+- Optional KDE/GNOME login startup with a user service, persistent settings,
+  journal logs, and enable/disable/start/restart/stop/status commands.
 
 ## Material limitations
 
@@ -370,3 +445,5 @@ its upstream license. See `LICENSE` and `NOTICE.md`.
 - [Linux PCI sysfs resource mapping](https://www.kernel.org/doc/html/latest/PCI/sysfs-pci.html)
 - [PipeWire threaded-loop locking](https://docs.pipewire.org/page_thread_loop.html)
 - [Arch portal backend configuration](https://wiki.archlinux.org/title/XDG_Desktop_Portal)
+- [XDG desktop autostart](https://specifications.freedesktop.org/autostart/latest/)
+- [systemd graphical user sessions](https://www.freedesktop.org/software/systemd/man/latest/systemd.special.html#graphical-session.target)

@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$ROOT/versions.env"
-for tool in git cmake ninja pkg-config cc; do
+for tool in git cmake ninja pkg-config cc gio desktop-file-validate systemd-analyze; do
   command -v "$tool" >/dev/null || { printf 'Missing tool: %s\n' "$tool" >&2; exit 1; }
 done
 pkg-config --exists gio-2.0 gio-unix-2.0 libpipewire-0.3 libspa-0.2 || {

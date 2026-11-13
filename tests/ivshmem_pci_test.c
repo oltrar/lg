@@ -56,6 +56,15 @@ int main(void)
   assert(lgPciResolve(root, NULL, &mapping, error, sizeof(error)));
   assert(mapping.size == 64 * 1024 * 1024);
   assert(strstr(mapping.path, "/0000:06:01.0/resource2"));
+  assert(!mapping.wcPath[0]);
+  writeFile(root, "0000:06:01.0", "resource2_wc", "");
+  assert(lgPciResolve(root, NULL, &mapping, error, sizeof(error)) &&
+    strstr(mapping.wcPath, "/resource2_wc"));
+  writeFile(root, "0000:06:01.0", "resource", "0 0 0\n0 0 0\n100000000 103ffffff 200\n");
+  assert(lgPciResolve(root, NULL, &mapping, error, sizeof(error)) && !mapping.wcPath[0]);
+  snprintf(path, sizeof(path), "%s/0000:06:01.0/resource2_wc", root);
+  assert(unlink(path) == 0);
+  writeFile(root, "0000:06:01.0", "resource", "0 0 0\n0 0 0\n100000000 103ffffff 2200\n");
   assert(!lgPciResolve(root, "../bad", &mapping, error, sizeof(error)));
   device(root, "0000:07:01.0");
   assert(!lgPciResolve(root, NULL, &mapping, error, sizeof(error)));

@@ -8,6 +8,7 @@
 struct LGPciMapping
 {
   char path[PATH_MAX];
+  char wcPath[PATH_MAX];
   size_t size;
 };
 

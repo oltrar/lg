@@ -6,7 +6,7 @@ backend=xdg-desktop-portal-kde
 desktop=${XDG_CURRENT_DESKTOP:-}
 [[ ${desktop^^} != *GNOME* ]] || backend=xdg-desktop-portal-gnome
 if command -v pacman >/dev/null; then
-  packages=(base-devel git cmake ninja pkgconf pipewire glib2 dbus systemd
+  packages=(base-devel git cmake ninja pkgconf pipewire glib2 dbus systemd wayland
     xdg-desktop-portal "$backend" pciutils desktop-file-utils)
   if ! pacman -Q "${packages[@]}" >/dev/null 2>&1; then
     sudo pacman -S --needed "${packages[@]}"

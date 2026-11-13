@@ -8,6 +8,7 @@
  * An owned snapshot separates producer lifetime from shared-memory publication.
  */
 #include "portal.h"
+#include "kde_capture.h"
 #include "frame_layout.h"
 #include "format_params.h"
 #include "interface/capture.h"
@@ -25,6 +26,7 @@
 struct pipewire
 {
   struct Portal * portal;
+  struct KDECapture * kde;
   char * sessionHandle;
   struct pw_thread_loop * loop;
   struct pw_context * context;
@@ -36,6 +38,8 @@ struct pipewire
   bool started, stop, failed, hasFormat, connected, warnedBuffer;
   bool loggedBuffer, loggedCopy, loggedWrite, warnedNoFrame;
   uint64_t captureStartedAt, receivedBuffers, rejectedBuffers;
+  uint64_t copiedFrames, writtenFrames, copyNs, writeNs;
+  uint64_t statsTime, statsReceived, statsCopied, statsWritten, statsCopyNs, statsWriteNs;
   unsigned width, height, formatVer;
   CaptureFormat format;
   /* Only the Looking Glass capture thread touches the snapshot. */
@@ -64,7 +68,10 @@ static void pipewire_initOptions(void)
      .type = OPTION_TYPE_INT, .value.x_int = 60, .validator = fpsValidator},
     {.module = "pipewire", .name = "restore",
      .description = "Reuse the saved monitor selection (no requests a fresh chooser)",
-     .type = OPTION_TYPE_BOOL, .value.x_bool = true}, {0}
+     .type = OPTION_TYPE_BOOL, .value.x_bool = true},
+    {.module = "pipewire", .name = "kdeOutput",
+     .description = "Saved KDE connector for native unattended capture (empty uses portal)",
+     .type = OPTION_TYPE_STRING, .value.x_string = ""}, {0}
   };
   option_register(options);
 }
@@ -200,6 +207,7 @@ static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
    * monitor alive across that idle transition; resume the SAME stream. */
   if (this->stream)
   {
+    if (this->kde && !lgKdeCapture_alive(this->kde)) return false;
     pw_thread_loop_lock(this->loop);
     this->stop = false;
     int status = this->failed ? -EPIPE : pw_stream_set_active(this->stream, true);
@@ -210,6 +218,7 @@ static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
       return false;
     }
     DEBUG_INFO("Resuming the existing monitor session (no new chooser)");
+    this->statsTime = 0;
     return true;
   }
   const char * stage = "opening the desktop portal";
@@ -218,30 +227,38 @@ static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
   this->loggedBuffer = this->loggedCopy = this->loggedWrite = this->warnedNoFrame = false;
   this->captureStartedAt = this->receivedBuffers = this->rejectedBuffers = 0;
   this->readyWidth = this->readyHeight = 0;
-  this->portal = portal_create();
-  if (!this->portal)
-    goto fail;
-  stage = "ScreenCast.CreateSession";
-  if (!portal_createScreenCastSession(this->portal, &this->sessionHandle))
-    goto fail;
-  stage = "ScreenCast.SelectSources";
-  if (!portal_selectSource(this->portal, this->sessionHandle,
-        option_get_bool("pipewire", "restore")))
-    goto fail;
-  stage = "ScreenCast.Start / monitor selection";
-  uint32_t node = portal_getPipewireNode(this->portal, this->sessionHandle);
-  if (!node)
-    goto fail;
-  stage = "ScreenCast.OpenPipeWireRemote";
-  int fd = portal_openPipewireRemote(this->portal, this->sessionHandle);
-  if (fd < 0)
-    goto fail;
+  int fd = -1;
+  uint32_t node;
+  const char * connector = option_get_string("pipewire", "kdeOutput");
+  if (*connector)
+  {
+    stage = "opening the saved native KDE connector";
+    this->kde = lgKdeCapture_open(connector);
+    if (!this->kde) goto fail;
+    node = lgKdeCapture_node(this->kde);
+  }
+  else
+  {
+    this->portal = portal_create();
+    if (!this->portal) goto fail;
+    stage = "ScreenCast.CreateSession";
+    if (!portal_createScreenCastSession(this->portal, &this->sessionHandle)) goto fail;
+    stage = "ScreenCast.SelectSources";
+    if (!portal_selectSource(this->portal, this->sessionHandle,
+          option_get_bool("pipewire", "restore"))) goto fail;
+    stage = "ScreenCast.Start / monitor selection";
+    node = portal_getPipewireNode(this->portal, this->sessionHandle);
+    if (!node) goto fail;
+    stage = "ScreenCast.OpenPipeWireRemote";
+    fd = portal_openPipewireRemote(this->portal, this->sessionHandle);
+    if (fd < 0) goto fail;
+  }
   stage = "creating the PipeWire thread loop";
   this->loop = pw_thread_loop_new("looking-glass-capture", NULL);
   if (!this->loop)
   {
     DEBUG_ERROR("pw_thread_loop_new: %s", strerror(errno));
-    close(fd);
+    if (fd >= 0) close(fd);
     goto fail;
   }
   stage = "creating the PipeWire context";
@@ -249,7 +266,7 @@ static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
   if (!this->context)
   {
     DEBUG_ERROR("pw_context_new: %s", strerror(errno));
-    close(fd);
+    if (fd >= 0) close(fd);
     goto fail;
   }
   stage = "starting the PipeWire thread loop";
@@ -257,13 +274,14 @@ static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
   if (status < 0)
   {
     DEBUG_ERROR("pw_thread_loop_start: %s", strerror(-status));
-    close(fd);
+    if (fd >= 0) close(fd);
     goto fail;
   }
   this->started = true;
   pw_thread_loop_lock(this->loop);
   stage = "connecting to the portal PipeWire remote";
-  this->core = pw_context_connect_fd(this->context, fd, NULL, 0);
+  this->core = fd >= 0 ? pw_context_connect_fd(this->context, fd, NULL, 0) :
+    pw_context_connect(this->context, NULL, 0);
   if (!this->core)
   {
     DEBUG_ERROR("pw_context_connect_fd: %s", strerror(errno));
@@ -353,6 +371,8 @@ static bool pipewire_shutdown(void)
     portal_free(this->portal);
   }
   this->portal = NULL;
+  lgKdeCapture_close(this->kde);
+  this->kde = NULL;
   return true;
 }
 static void pipewire_free(void)
@@ -379,6 +399,34 @@ static void reportNoFrame(void)
       (unsigned long long)this->rejectedBuffers, this->hasFormat ? "yes" : "no");
     this->warnedNoFrame = true;
   }
+}
+static uint64_t monotonicNs(void)
+{
+  struct timespec now;
+  if (clock_gettime(CLOCK_MONOTONIC, &now)) return 0;
+  return (uint64_t)now.tv_sec * SPA_NSEC_PER_SEC + now.tv_nsec;
+}
+static void reportPerformance(void)
+{
+  uint64_t now = monotonicNs();
+  if (!this->statsTime)
+    goto reset;
+  if (now - this->statsTime < 5 * SPA_NSEC_PER_SEC) return;
+  double seconds = (now - this->statsTime) / 1e9;
+  uint64_t copies = this->copiedFrames - this->statsCopied;
+  uint64_t writes = this->writtenFrames - this->statsWritten;
+  DEBUG_INFO("Video rates: source=%.1f/s copied=%.1f/s uploaded=%.1f/s; copy=%.3f ms upload=%.3f ms; requested max=%d",
+    (this->receivedBuffers - this->statsReceived) / seconds, copies / seconds, writes / seconds,
+    copies ? (this->copyNs - this->statsCopyNs) / (copies * 1e6) : 0.0,
+    writes ? (this->writeNs - this->statsWriteNs) / (writes * 1e6) : 0.0,
+    option_get_int("pipewire", "fps"));
+reset:
+  this->statsTime = now;
+  this->statsReceived = this->receivedBuffers;
+  this->statsCopied = this->copiedFrames;
+  this->statsWritten = this->writtenFrames;
+  this->statsCopyNs = this->copyNs;
+  this->statsWriteNs = this->writeNs;
 }
 static CaptureResult rejectBuffer(const char * reason, const struct spa_data * data)
 {
@@ -424,7 +472,10 @@ static CaptureResult copyBuffer(struct spa_buffer * buffer)
     this->capacity = layout.packedSize;
   }
   /* Copy before returning the buffer; geometry cannot change under this lock. */
+  uint64_t start = monotonicNs();
   lgFramePack(this->snapshot, data->data, &layout);
+  this->copyNs += monotonicNs() - start;
+  ++this->copiedFrames;
   this->readyWidth = this->width;
   this->readyHeight = this->height;
   this->readyVersion = this->formatVer;
@@ -439,7 +490,9 @@ static CaptureResult copyBuffer(struct spa_buffer * buffer)
 }
 static CaptureResult pipewire_capture(unsigned index, FrameBuffer * target)
 {
+  if (this->kde && !lgKdeCapture_alive(this->kde)) return CAPTURE_RESULT_ERROR;
   pw_thread_loop_lock(this->loop);
+  reportPerformance();
   reportNoFrame();
   struct timespec deadline;
   pw_thread_loop_get_time(this->loop, &deadline, SPA_NSEC_PER_SEC);
@@ -494,8 +547,11 @@ static CaptureResult pipewire_getFrame(unsigned index, FrameBuffer * frame,
   if (maxFrameSize < this->frameHeaderSize ||
       size > maxFrameSize - this->frameHeaderSize || !this->snapshot)
     return CAPTURE_RESULT_ERROR;
+  uint64_t start = monotonicNs();
   if (!framebuffer_write(frame, this->snapshot, size))
     return CAPTURE_RESULT_ERROR;
+  this->writeNs += monotonicNs() - start;
+  ++this->writtenFrames;
   if (!this->loggedWrite)
   {
     DEBUG_INFO("First raw frame written to IVSHMEM: %ux%u, %zu bytes%s",

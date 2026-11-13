@@ -44,6 +44,7 @@ struct IVSHMEMInfo
   int  devFd;
   int  size;
   bool hasDMA;
+  bool writeCombined;
 };
 
 static bool ivshmemDeviceValidator(struct Option * opt, const char ** error)
@@ -134,6 +135,7 @@ bool ivshmemOpenDev(struct IVSHMEM * dev, const char * shmDevice)
   int devSize;
   int devFd;
   bool hasDMA;
+  bool writeCombined = false;
   struct LGPciMapping pci;
   bool isPCI = !strcmp(shmDevice, "ivshmem") || !strncmp(shmDevice, "ivshmem:", 8);
 
@@ -152,6 +154,11 @@ bool ivshmemOpenDev(struct IVSHMEM * dev, const char * shmDevice)
       return false;
     }
     shmDevice = pci.path;
+    if (pci.wcPath[0] && access(pci.wcPath, R_OK | W_OK) == 0)
+    {
+      shmDevice = pci.wcPath;
+      writeCombined = true;
+    }
     DEBUG_INFO("PCI IVSHMEM BAR2 : %s (%zu MiB)", shmDevice, pci.size / 1048576);
   }
 
@@ -178,6 +185,12 @@ bool ivshmemOpenDev(struct IVSHMEM * dev, const char * shmDevice)
   else
   {
     devFd = open(shmDevice, O_RDWR | O_CLOEXEC, (mode_t)0600);
+    if (devFd < 0 && writeCombined)
+    {
+      writeCombined = false;
+      shmDevice = pci.path;
+      devFd = open(shmDevice, O_RDWR | O_CLOEXEC);
+    }
     if (devFd < 0)
     {
       DEBUG_ERROR("Failed to open: %s", shmDevice);
@@ -205,6 +218,16 @@ bool ivshmemOpenDev(struct IVSHMEM * dev, const char * shmDevice)
   }
 
   void * map = mmap(0, devSize, PROT_READ | PROT_WRITE, MAP_SHARED, devFd, 0);
+  if (map == MAP_FAILED && writeCombined)
+  {
+    DEBUG_WARN("Write-combining mapping failed (%s); falling back to ordinary BAR2", strerror(errno));
+    close(devFd);
+    devFd = open(pci.path, O_RDWR | O_CLOEXEC);
+    writeCombined = false;
+    shmDevice = pci.path;
+    if (devFd >= 0)
+      map = mmap(0, devSize, PROT_READ | PROT_WRITE, MAP_SHARED, devFd, 0);
+  }
   if (map == MAP_FAILED)
   {
     DEBUG_ERROR("Failed to map the shared memory device: %s", shmDevice);
@@ -225,6 +248,13 @@ bool ivshmemOpenDev(struct IVSHMEM * dev, const char * shmDevice)
   info->size   = devSize;
   info->devFd  = devFd;
   info->hasDMA = hasDMA;
+  info->writeCombined = writeCombined;
+  if (isPCI)
+  {
+    DEBUG_INFO("PCI cache mode   : %s", writeCombined ? "write-combining (resource2_wc)" : "ordinary/uncached BAR2 fallback");
+    if (!writeCombined)
+      DEBUG_WARN("For higher upload rates, re-run install.sh to grant resource2_wc access (when exported by the guest kernel)");
+  }
 
   dev->opaque = info;
   dev->size   = devSize;

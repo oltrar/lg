@@ -5,13 +5,14 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 UNIT=looking-glass-host.service
 MARKER='# Managed by oltrar/lg setup-startup.sh (v1)'
 CONFIG=${XDG_CONFIG_HOME:-"$HOME/.config"}
+DATA=${XDG_DATA_HOME:-"$HOME/.local/share"}
 ACTION=${1:-}
 usage() {
   printf 'Usage: bash setup-startup.sh {enable|repair|disable|uninstall|start|restart|stop|status|choose-display}\nRun as your guest desktop user, without sudo.\n'
 }
 [[ $# == 1 && $ACTION =~ ^(enable|repair|disable|uninstall|start|restart|stop|status|choose-display)$ ]] || { usage; exit 1; }
 (( EUID != 0 )) || { printf 'Run without sudo, as the guest desktop user.\n' >&2; exit 1; }
-[[ $CONFIG == /* && $ROOT != *$'\n'* && $ROOT != *$'\r'* &&
+[[ $CONFIG == /* && $DATA == /* && $DATA != *$'\n'* && $DATA != *$'\r'* && $ROOT != *$'\n'* && $ROOT != *$'\r'* &&
    $CONFIG != *$'\n'* && $CONFIG != *$'\r'* ]] || {
   printf 'Use an absolute XDG_CONFIG_HOME and paths without line breaks.\n' >&2; exit 1;
 }
@@ -19,6 +20,8 @@ command -v systemctl >/dev/null || { printf 'A systemd user session is required.
 SERVICE="$CONFIG/systemd/user/$UNIT"
 DESKTOP="$CONFIG/autostart/looking-glass-host.desktop"
 OPTIONS="$CONFIG/looking-glass-linux-wayland/autostart.env"
+APP="$DATA/applications/io.github.oltrar.LookingGlass.desktop"
+SOURCE_APP="$DATA/applications/io.github.oltrar.LookingGlass.Source.desktop"
 STAGING=''
 cleanup() {
   if [[ -n $STAGING ]]; then
@@ -30,7 +33,7 @@ trap cleanup EXIT
 managed() { [[ -f $1 && ! -L $1 ]] && grep -Fxq -- "$MARKER" "$1"; }
 preflight() {
   local file
-  for file in "$SERVICE" "$DESKTOP"; do
+  for file in "$SERVICE" "$DESKTOP" "$APP" "$SOURCE_APP"; do
     if [[ -e $file || -L $file ]] && ! managed "$file"; then
       printf 'Preserving an unmanaged startup file: %s\n' "$file" >&2; exit 1
     fi
@@ -96,7 +99,7 @@ case $ACTION in
       printf 'Preserving unexpected options path: %s\n' "$OPTIONS" >&2; exit 1;
     }
     umask 077
-    mkdir -p -- "$(dirname -- "$SERVICE")" "$(dirname -- "$DESKTOP")" "$(dirname -- "$OPTIONS")"
+    mkdir -p -- "$(dirname -- "$SERVICE")" "$(dirname -- "$DESKTOP")" "$(dirname -- "$OPTIONS")" "$(dirname -- "$APP")"
     if [[ ! -f $OPTIONS ]]; then
       write_file "$OPTIONS" <<'EOF'
 # Startup-only settings, in systemd EnvironmentFile syntax (not a shell script).
@@ -148,6 +151,26 @@ Exec=/usr/bin/bash $(desktop_quote "$ROOT/scripts/start-session.sh")
 Terminal=false
 OnlyShowIn=KDE;GNOME;
 EOF
+    # KWin versions that restrict capture protocols match the actual executable
+    # against installed desktop files. Declare only this app's capture interface.
+    for role in capture source; do
+      application=$APP
+      executable="$ROOT/_build/host/looking-glass-host"
+      if [[ $role == source ]]; then application=$SOURCE_APP; executable="$ROOT/_build/host/lg-kde-source"; fi
+      write_file "$application" <<EOF
+$MARKER
+[Desktop Entry]
+Type=Application
+Name=Looking Glass guest capture
+Exec=$(desktop_quote "$executable")
+NoDisplay=true
+X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1
+EOF
+      desktop-file-validate "$application"
+    done
+    for cache_tool in kbuildsycoca6 kbuildsycoca5; do
+      if command -v "$cache_tool" >/dev/null; then timeout 20s "$cache_tool" --noincremental; break; fi
+    done
     systemctl --user daemon-reload
     printf 'Enabled for the next KDE/GNOME Wayland login. Current capture is unchanged.\nSettings: %s\nStop any manual capture before using: bash setup-startup.sh start\n' "$OPTIONS"
     ;;
@@ -158,6 +181,7 @@ EOF
       rm -- "$SERVICE"
     fi
     if managed "$DESKTOP"; then rm -- "$DESKTOP"; fi
+    for application in "$APP" "$SOURCE_APP"; do if managed "$application"; then rm -- "$application"; fi; done
     systemctl --user daemon-reload
     printf 'Startup disabled; service stopped. Settings and portal permissions kept.\n'
     ;;

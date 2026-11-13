@@ -7,6 +7,7 @@
 #include <spa/param/buffers.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include "kde_test_server.h"
 
 #define WIDTH 320
 #define HEIGHT 240
@@ -133,7 +134,8 @@ static void startProducer(struct Producer * p)
 }
 int main(int argc, char ** argv)
 {
-  assert(argc == 5); /* guest executable, frame checker, shared file, runtime */
+  assert(argc == 5 || argc == 6); /* optional native KDE path */
+  bool native = argc == 6;
   g_test_init(&argc, &argv, NULL);
   g_autoptr(GTestDBus) bus = g_test_dbus_new(G_TEST_DBUS_NONE);
   g_test_dbus_up(bus);
@@ -144,12 +146,15 @@ int main(int argc, char ** argv)
     .pipewireSocket = socketPath, .node = producer.node};
   g_mutex_init(&server.mutex); g_cond_init(&server.condition);
   GThread * thread = g_thread_new("portal-fixture", serve, &server);
+  struct KdeServer kdeServer = {.node = producer.node};
+  if (native) startKdeServer(&kdeServer, false);
   g_mutex_lock(&server.mutex);
   gint64 deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
   while (!server.ready) assert(g_cond_wait_until(&server.condition, &server.mutex, deadline));
   g_mutex_unlock(&server.mutex);
   g_autofree char * shmOption = g_strdup_printf("app:shmFile=%s", argv[3]);
-  char * command[] = {argv[1], shmOption, "app:capture=pipewire", "pipewire:restore=no", NULL};
+  char * command[] = {argv[1], shmOption, "app:capture=pipewire", "pipewire:restore=no",
+    native ? "pipewire:kdeOutput=HDMI-A-1" : "pipewire:kdeOutput=", NULL};
   GPid host;
   assert(g_spawn_async(NULL, command, NULL, G_SPAWN_DO_NOT_REAP_CHILD,
     NULL, NULL, &host, NULL));
@@ -178,14 +183,16 @@ int main(int argc, char ** argv)
       for (unsigned x = 0; x < WIDTH * 4; ++x)
         assert((uint8_t)raw[(y * WIDTH * 4) + x] == ((x + y * 7) & 255));
     g_usleep(500000); /* last client leaves -> pause -> next client resumes */
-    assert(g_atomic_int_get(&server.createCount) == 1);
+    assert(g_atomic_int_get(&server.createCount) == (native ? 0 : 1));
+    if (native) assert(atomic_load(&kdeServer.opened) == 1 && atomic_load(&kdeServer.capturedHdmi));
     assert(g_atomic_int_get(&server.closeCount) == 0);
   }
   kill(host, SIGINT);
   int status;
   assert(waitpid(host, &status, 0) == host && WIFEXITED(status) && WEXITSTATUS(status) == 0x10);
   g_spawn_close_pid(host);
-  assert(g_atomic_int_get(&server.closeCount) == 1);
+  assert(g_atomic_int_get(&server.closeCount) == (native ? 0 : 1));
+  if (native) stopKdeServer(&kdeServer);
   g_main_context_invoke(server.context, stop, &server); g_thread_join(thread);
   g_cond_clear(&server.condition); g_mutex_clear(&server.mutex);
   pw_thread_loop_stop(producer.loop);

@@ -11,6 +11,7 @@ if [[ ${1:-} != --inner ]]; then
   cp "$ROOT/scripts/start-session.sh" "$PROJECT/scripts/"
   cp "$ROOT/scripts/capture-report.sh" "$PROJECT/scripts/"
   cp "$ROOT/scripts/build-info.sh" "$PROJECT/scripts/"
+  cp "$ROOT/scripts/select-display.sh" "$PROJECT/scripts/"
   cp "$ROOT/tests/startup_test.sh" "$PROJECT/tests/"
   cp "$ROOT/tests/environment_file_path_test.c" "$PROJECT/tests/"
   if (( EUID == 0 )); then
@@ -34,6 +35,7 @@ export HOME="$FIXTURE/home"
 export XDG_CONFIG_HOME="$FIXTURE/"'config space % $ " \ ` & (test) * ? [literal]'
 export XDG_RUNTIME_DIR="$FIXTURE/runtime"
 export XDG_STATE_HOME="$FIXTURE/state space"
+export XDG_DATA_HOME="$FIXTURE/data space"
 export XDG_SESSION_TYPE=wayland WAYLAND_DISPLAY=wayland-test
 export XDG_CURRENT_DESKTOP=KDE DBUS_SESSION_BUS_ADDRESS=unix:path=/test/bus
 export LG_TEST_LOG="$FIXTURE/systemctl.log"
@@ -70,6 +72,8 @@ exec "$@"
 EOF
 chmod +x "$FIXTURE/bin/sudo"
 printf '#!/bin/sh\nexit 0\n' > "$ROOT/scripts/ensure-deps.sh"
+printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/bin/kbuildsycoca6"
+chmod +x "$FIXTURE/bin/kbuildsycoca6"
 mkdir -p "$ROOT/overlay" "$ROOT/tools"
 printf 'source version one\n' > "$ROOT/overlay/test.c"
 printf 'frame verifier source\n' > "$ROOT/tools/test.c"
@@ -230,11 +234,32 @@ if WAYLAND_DISPLAY= bash "$ROOT/setup-startup.sh" start; then
 fi
 [[ ! -s $LG_TEST_LOG ]]
 
+# The real terminal chooser saves a connector once. Future launches do not
+# enumerate displays or open a portal, even after QXL disappears/positions move.
+cat > "$ROOT/_build/host/lg-kde-source" <<'EOF'
+#!/bin/sh
+printf 'Virtual-1\t1920x1080\t60 Hz\tQXL\nHDMI-A-1\t2560x1440\t144 Hz\tNVIDIA dummy plug\n'
+EOF
+chmod +x "$ROOT/_build/host/lg-kde-source"
+export LG_TEST_PROJECT="$ROOT" XDG_CURRENT_DESKTOP=KDE
+printf '2\n' | script -q -e -c 'bash "$LG_TEST_PROJECT/scripts/select-display.sh"' /dev/null
+[[ $(<"$XDG_CONFIG_HOME/looking-glass-linux-wayland/kde-output") == HDMI-A-1 ]]
+[[ $(stat -c %a "$XDG_CONFIG_HOME/looking-glass-linux-wayland/kde-output") == 600 ]]
+bash "$ROOT/run-guest.sh"
+grep -Fxq 'pipewire:kdeOutput=HDMI-A-1' "$LG_TEST_CAPTURE_LOG"
+printf '#!/bin/sh\nexit 1\n' > "$ROOT/_build/host/lg-kde-source"
+bash "$ROOT/run-guest.sh"
+grep -Fxq 'pipewire:kdeOutput=HDMI-A-1' "$LG_TEST_CAPTURE_LOG"
+XDG_CURRENT_DESKTOP=GNOME bash "$ROOT/run-guest.sh"
+grep -Fxq 'pipewire:kdeOutput=' "$LG_TEST_CAPTURE_LOG"
+grep -q 'X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1' "$XDG_DATA_HOME/applications/io.github.oltrar.LookingGlass.desktop"
+
 # Removing startup stops the unit and keeps preferences and portal restore data.
 printf 'private portal restore token\n' > "$XDG_CONFIG_HOME/looking-glass-linux-wayland/restore-token"
 bash "$ROOT/setup-startup.sh" stop
 bash "$ROOT/setup-startup.sh" uninstall
 [[ ! -e $SERVICE && ! -e $DESKTOP && -f $OPTIONS ]]
+[[ ! -e $XDG_DATA_HOME/applications/io.github.oltrar.LookingGlass.desktop ]]
 grep -Fxq -- '--user stop looking-glass-host.service' "$LG_TEST_LOG"
 grep -Fxq 'private portal restore token' "$XDG_CONFIG_HOME/looking-glass-linux-wayland/restore-token"
 bash "$ROOT/setup-startup.sh" disable

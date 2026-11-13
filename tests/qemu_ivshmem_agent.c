@@ -11,6 +11,9 @@ int main(void)
   if (mapping.size != 64 * 1024 * 1024 || ivshmemHasDMA(&mapping)) return 3;
   if (memcmp(mapping.mem, "LG-HOST-HELLO", 14)) return 4;
   memcpy((char *)mapping.mem + mapping.size - 16, "LG-GUEST-OK", 12);
+  __sync_synchronize();
+  if (((struct IVSHMEMInfo *)mapping.opaque)->writeCombined)
+    puts("PASS: QEMU guest uses write-combining IVSHMEM BAR2 mapping");
   ivshmemClose(&mapping);
   puts("PASS: unprivileged guest mapped 64 MiB IVSHMEM BAR2 without KVMFR");
   return 0;

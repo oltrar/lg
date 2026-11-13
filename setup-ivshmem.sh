@@ -57,6 +57,11 @@ fi
 # sysfs has no POSIX ACL support. Scope ownership to this device's memory BAR.
 chown "$UID_NUMBER:$GID_NUMBER" "$DEVICE/resource2"
 chmod 0600 "$DEVICE/resource2"
+if [[ -f $DEVICE/resource2_wc && ! -L $DEVICE/resource2_wc ]]; then
+  chown "$UID_NUMBER:$GID_NUMBER" "$DEVICE/resource2_wc"
+  chmod 0600 "$DEVICE/resource2_wc"
+  printf 'Enabled write-combining BAR2 mapping for faster raw video uploads.\n'
+fi
 printf 'Guest %s can map %s/resource2; no KVMFR module is required.\n' "$TARGET_USER" "$DEVICE"
 
 if ((PERSIST)); then

@@ -22,6 +22,18 @@ for argument in "$@"; do
     *) arguments+=("$argument") ;;
   esac
 done
+KDE_OUTPUT=${LG_KDE_OUTPUT:-}
+desktop=${XDG_CURRENT_DESKTOP:-}
+if [[ ${desktop^^} == *KDE* ]]; then
+  if [[ $RESTORE == no && -z $KDE_OUTPUT ]]; then bash "$ROOT/scripts/select-display.sh"; fi
+  saved=${XDG_CONFIG_HOME:-"$HOME/.config"}/looking-glass-linux-wayland/kde-output
+  if [[ -z $KDE_OUTPUT && -f $saved && ! -L $saved && -O $saved ]]; then
+    IFS= read -r KDE_OUTPUT < "$saved"
+  fi
+fi
+[[ -z $KDE_OUTPUT || $KDE_OUTPUT =~ ^[A-Za-z0-9_.:-]{1,255}$ ]] || {
+  printf 'Invalid saved KDE connector. Re-select using bash install.sh.\n' >&2; exit 1;
+}
 source "$ROOT/scripts/capture-report.sh"
 if ! lgStartReport "$ROOT"; then
   printf 'Cannot save a capture report; continuing with terminal/journal logging.\n' >&2
@@ -55,4 +67,4 @@ if [[ $DEVICE != ivshmem && $DEVICE != ivshmem:* ]]; then
   }
 fi
 exec "$BINARY" "app:shmFile=$DEVICE" app:capture=pipewire "pipewire:fps=$FPS" \
-  "pipewire:restore=$RESTORE" "${arguments[@]}"
+  "pipewire:restore=$RESTORE" "pipewire:kdeOutput=$KDE_OUTPUT" "${arguments[@]}"

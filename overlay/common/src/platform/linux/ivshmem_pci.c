@@ -127,6 +127,13 @@ bool lgPciResolve(const char * root, const char * address,
       end - start >= INT_MAX || end - start + 1 < 4096)
     goto invalidResource;
   mapping->size = (size_t)(end - start + 1);
+  mapping->wcPath[0] = '\0';
+  /* Linux exports this alias only for a prefetchable BAR on WC-capable
+   * architectures. Never change cache attributes on an arbitrary PCI BAR. */
+  if ((flags & 0x2000) &&
+      snprintf(path, sizeof(path), "%s/%s/resource2_wc", root, selected) < sizeof(path) &&
+      lstat(path, &st) == 0 && S_ISREG(st.st_mode))
+    strcpy(mapping->wcPath, path);
   if (snprintf(mapping->path, sizeof(mapping->path), "%s/%s/resource2", root, selected) >= sizeof(mapping->path))
     goto invalidResource;
   return true;

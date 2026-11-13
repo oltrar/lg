@@ -242,7 +242,7 @@ printf 'Virtual-1\t1920x1080\t60 Hz\tQXL\nHDMI-A-1\t2560x1440\t144 Hz\tNVIDIA du
 EOF
 chmod +x "$ROOT/_build/host/lg-kde-source"
 export LG_TEST_PROJECT="$ROOT" XDG_CURRENT_DESKTOP=KDE
-printf '2\n' | script -q -e -c 'bash "$LG_TEST_PROJECT/scripts/select-display.sh"' /dev/null
+printf '2\n' | SHELL=/bin/bash script -q -e -c 'bash "$LG_TEST_PROJECT/scripts/select-display.sh"' /dev/null
 [[ $(<"$XDG_CONFIG_HOME/looking-glass-linux-wayland/kde-output") == HDMI-A-1 ]]
 [[ $(stat -c %a "$XDG_CONFIG_HOME/looking-glass-linux-wayland/kde-output") == 600 ]]
 bash "$ROOT/run-guest.sh"

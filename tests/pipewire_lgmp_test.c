@@ -139,6 +139,8 @@ int main(int argc, char ** argv)
   g_test_init(&argc, &argv, NULL);
   g_autoptr(GTestDBus) bus = g_test_dbus_new(G_TEST_DBUS_NONE);
   g_test_dbus_up(bus);
+  /* GTestDBus deliberately clears XDG_RUNTIME_DIR along with display env. */
+  g_setenv("XDG_RUNTIME_DIR", argv[4], TRUE);
   g_autofree char * socketPath = g_build_filename(argv[4], "pipewire-0", NULL);
   struct Producer producer = {0};
   startProducer(&producer);

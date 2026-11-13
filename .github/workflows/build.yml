@@ -17,6 +17,8 @@ jobs:
       - uses: actions/checkout@v4
       - run: bash build.sh
       - run: bash tests/pipewire-lgmp.sh
+      - run: apt-get install -y --no-install-recommends kwin-wayland dbus-x11 libgl1-mesa-dri libegl-mesa0
+      - run: bash tests/kwin-native.sh
   ivshmem-qemu:
     runs-on: ubuntu-latest
     container: debian:bookworm

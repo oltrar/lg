@@ -1,10 +1,37 @@
 # Validation record
 
+## NVIDIA monitor selection — 2026-11-13
+
+The user confirmed screen, keyboard, mouse and automatic login startup work,
+but observed Looking Glass capturing QXL rather than the NVIDIA/dummy-plug
+display. The NVIDIA display is available in the guest and visible through
+their PCVR setup. Removing QXL led to no LG feed; the corresponding startup
+log is not available yet, so the exact failure stage remains unconfirmed.
+
+Added `run-guest.sh --choose-display`, `LG_CAPTURE_RESTORE=yes|no`, and
+`setup-startup.sh choose-display`. The latter stops the managed service and
+runs the one-time chooser in the foreground. No saved restore token is sent
+for a fresh choice; a successful choice is saved for future normal startup.
+Cancellation/empty-stream responses preserve the prior token. A successful
+choice without a reusable token removes the old selection instead of allowing
+a later switch back to QXL. New diagnostics
+report restoration, selected-stream metadata and DRM connector/GPU state.
+
+The real private-D-Bus test now checks monitor-only selection, omission of an
+existing QXL token, replacement with a new selection, subsequent restoration
+and token rotation, denied persistence, mode 0600, and cancellation/empty-stream preservation.
+Launcher tests verify the flag, environment setting and startup chooser without
+changing saved startup preferences. Native CI results are recorded on the PR.
+Actual NVIDIA-output capture with QXL removed still needs a guest retry;
+sound and concurrent microphone use remain untested.
+
 ## Optional desktop startup and user feedback — 2026-11-13
 
 The user confirmed that screen passthrough works in their CachyOS guest with
-NVIDIA passthrough after the portal parser fix. Keyboard, mouse, audio and
-concurrent host/guest microphone use have **not yet been tested by the user**.
+NVIDIA passthrough after the portal parser fix. At that point keyboard, mouse,
+audio and concurrent host/guest microphone use had not been tested by the user.
+The later report above confirms keyboard/mouse/startup and clarifies that the
+captured output was QXL. Audio/microphone remain untested.
 This report does not establish capture on both desktop environments.
 
 Added opt-in KDE/GNOME Wayland login startup using an XDG desktop entry and a
@@ -98,7 +125,7 @@ The execution environment here is Windows and has no installed Linux runtime,
 Wayland compositor, passed-through VM GPU, IVSHMEM device or usable Linux guest.
 The local environment could not perform a native build; CI subsequently
 validated the complete user-space application build as recorded above.
-**KVMFR kernel builds and end-to-end input/audio tests remain unverified.**
+**KVMFR kernel builds and end-to-end audio tests remain unverified.**
 The real private-D-Bus portal test and the user's successful screen capture
 report supersede the earlier portal/display limitation. Build and unit-test success do not establish
 runtime correctness, performance or compatibility with current CachyOS kernels

@@ -7,9 +7,9 @@ MARKER='# Managed by oltrar/lg setup-startup.sh (v1)'
 CONFIG=${XDG_CONFIG_HOME:-"$HOME/.config"}
 ACTION=${1:-}
 usage() {
-  printf 'Usage: bash setup-startup.sh {enable|disable|start|restart|stop|status}\nRun as your guest desktop user, without sudo.\n'
+  printf 'Usage: bash setup-startup.sh {enable|disable|start|restart|stop|status|choose-display}\nRun as your guest desktop user, without sudo.\n'
 }
-[[ $# == 1 && $ACTION =~ ^(enable|disable|start|restart|stop|status)$ ]] || { usage; exit 1; }
+[[ $# == 1 && $ACTION =~ ^(enable|disable|start|restart|stop|status|choose-display)$ ]] || { usage; exit 1; }
 (( EUID != 0 )) || { printf 'Run without sudo, as the guest desktop user.\n' >&2; exit 1; }
 [[ $CONFIG == /* && $ROOT != *$'\n'* && $ROOT != *$'\r'* &&
    $CONFIG != *$'\n'* && $CONFIG != *$'\r'* ]] || {
@@ -76,6 +76,8 @@ case $ACTION in
 # Edit these, then run: bash setup-startup.sh restart
 LG_SHM=ivshmem
 LG_FPS=60
+# Keep yes for automatic startup; use the choose-display command to change once.
+LG_CAPTURE_RESTORE=yes
 EOF
     fi
     write_file "$SERVICE" <<EOF
@@ -121,6 +123,15 @@ EOF
       printf 'Enable startup first: bash setup-startup.sh enable\n' >&2; exit 1;
     }
     bash "$ROOT/scripts/start-session.sh" "$ACTION"
+    ;;
+  choose-display)
+    require_session
+    # Stop only this project's managed unit; the chooser runs in the accessible
+    # guest terminal so the user can see errors and use Ctrl+C after verifying.
+    if managed "$SERVICE"; then systemctl --user stop "$UNIT"; fi
+    printf 'Choose the NVIDIA/dummy-plug monitor in the guest sharing dialog.\n'
+    printf 'Stop any separate manual capture first. Press Ctrl+C when verified; then restart the startup service.\n'
+    exec bash "$ROOT/run-guest.sh" --choose-display
     ;;
   stop)
     managed "$SERVICE" || { printf 'No managed startup service is installed.\n' >&2; exit 1; }

@@ -4,6 +4,19 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 BINARY=${LG_BINARY:-"$ROOT/_build/host/looking-glass-host"}
 DEVICE=${LG_SHM:-ivshmem}
 FPS=${LG_FPS:-60}
+RESTORE=${LG_CAPTURE_RESTORE:-yes}
+arguments=()
+for argument in "$@"; do
+  case $argument in
+    --choose-display) RESTORE=no ;;
+    --help)
+      printf 'Usage: bash run-guest.sh [--choose-display] [Looking Glass options...]\n'
+      printf 'Choose-display skips the saved monitor once and saves the new selection.\n'
+      exit 0
+      ;;
+    *) arguments+=("$argument") ;;
+  esac
+done
 [[ ${XDG_SESSION_TYPE:-} == wayland ]] || {
   printf 'Run this in a terminal inside the guest KDE/GNOME Wayland session.\n' >&2; exit 1;
 }
@@ -12,6 +25,9 @@ FPS=${LG_FPS:-60}
 }
 [[ $FPS =~ ^[0-9]{1,3}$ ]] && ((10#$FPS >= 1 && 10#$FPS <= 360)) || {
   printf 'LG_FPS must be an integer from 1 to 360.\n' >&2; exit 1;
+}
+[[ $RESTORE == yes || $RESTORE == no ]] || {
+  printf 'LG_CAPTURE_RESTORE must be yes or no. Use --choose-display to reselect once.\n' >&2; exit 1;
 }
 [[ -x "$BINARY" ]] || { printf 'Build first: bash build.sh\n' >&2; exit 1; }
 # The application discovers/validates PCI BAR2 for ivshmem[:BDF]. An explicit
@@ -22,4 +38,5 @@ if [[ $DEVICE != ivshmem && $DEVICE != ivshmem:* ]]; then
     exit 1
   }
 fi
-exec "$BINARY" "app:shmFile=$DEVICE" app:capture=pipewire "pipewire:fps=$FPS" "$@"
+exec "$BINARY" "app:shmFile=$DEVICE" app:capture=pipewire "pipewire:fps=$FPS" \
+  "pipewire:restore=$RESTORE" "${arguments[@]}"

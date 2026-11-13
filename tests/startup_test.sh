@@ -29,6 +29,7 @@ export XDG_RUNTIME_DIR="$FIXTURE/runtime"
 export XDG_SESSION_TYPE=wayland WAYLAND_DISPLAY=wayland-test
 export XDG_CURRENT_DESKTOP=KDE DBUS_SESSION_BUS_ADDRESS=unix:path=/test/bus
 export LG_TEST_LOG="$FIXTURE/systemctl.log"
+export LG_TEST_CAPTURE_LOG="$FIXTURE/capture.log"
 unset DISPLAY XAUTHORITY XDG_SESSION_DESKTOP
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$FIXTURE/bin"
 export PATH="$FIXTURE/bin:$PATH"
@@ -37,7 +38,10 @@ cat > "$FIXTURE/bin/systemctl" <<'EOF'
 printf '%s\n' "$*" >> "$LG_TEST_LOG"
 EOF
 chmod +x "$FIXTURE/bin/systemctl"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$ROOT/_build/host/looking-glass-host"
+cat > "$ROOT/_build/host/looking-glass-host" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$LG_TEST_CAPTURE_LOG"
+EOF
 chmod +x "$ROOT/_build/host/looking-glass-host"
 SERVICE="$XDG_CONFIG_HOME/systemd/user/looking-glass-host.service"
 DESKTOP="$XDG_CONFIG_HOME/autostart/looking-glass-host.desktop"
@@ -70,6 +74,24 @@ grep -Fxq -- '--user import-environment WAYLAND_DISPLAY XDG_SESSION_TYPE XDG_CUR
 export XDG_CURRENT_DESKTOP=GNOME
 bash "$ROOT/setup-startup.sh" restart
 grep -Fxq -- '--user --no-block restart looking-glass-host.service' "$LG_TEST_LOG"
+# The selection command stops the managed service, opens a fresh manual chooser
+# once, and leaves saved startup preferences unchanged. Ordinary runs restore.
+cp "$OPTIONS" "$FIXTURE/options-before"
+bash "$ROOT/setup-startup.sh" choose-display
+grep -Fxq -- '--user stop looking-glass-host.service' "$LG_TEST_LOG"
+grep -Fxq 'pipewire:restore=no' "$LG_TEST_CAPTURE_LOG"
+! grep -Fxq -- '--choose-display' "$LG_TEST_CAPTURE_LOG"
+cmp "$OPTIONS" "$FIXTURE/options-before"
+bash "$ROOT/run-guest.sh"
+grep -Fxq 'pipewire:restore=yes' "$LG_TEST_CAPTURE_LOG"
+LG_CAPTURE_RESTORE=no bash "$ROOT/run-guest.sh" 'app:license=no'
+grep -Fxq 'pipewire:restore=no' "$LG_TEST_CAPTURE_LOG"
+grep -Fxq 'app:license=no' "$LG_TEST_CAPTURE_LOG"
+LG_CAPTURE_RESTORE=yes bash "$ROOT/run-guest.sh" --choose-display
+grep -Fxq 'pipewire:restore=no' "$LG_TEST_CAPTURE_LOG"
+if LG_CAPTURE_RESTORE=invalid bash "$ROOT/run-guest.sh"; then
+  printf 'FAIL: invalid capture restore setting was accepted\n' >&2; exit 1
+fi
 : > "$LG_TEST_LOG"
 XDG_SESSION_TYPE=x11 bash "$ROOT/scripts/start-session.sh"
 [[ ! -s $LG_TEST_LOG ]]
@@ -101,4 +123,4 @@ if bash "$ROOT/setup-startup.sh" enable; then
   printf 'FAIL: replaced startup symlink\n' >&2; exit 1
 fi
 [[ -L $DESKTOP ]]
-printf 'PASS: user startup install/remove, real desktop Exec parsing, systemd unit validation, session environment and settings preservation\n'
+printf 'PASS: user startup, real desktop Exec parsing, service validation, one-time display choice and settings preservation\n'

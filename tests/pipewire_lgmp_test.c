@@ -181,9 +181,9 @@ int main(int argc, char ** argv)
     assert(g_atomic_int_get(&server.createCount) == 1);
     assert(g_atomic_int_get(&server.closeCount) == 0);
   }
-  kill(host, SIGTERM);
+  kill(host, SIGINT);
   int status;
-  assert(waitpid(host, &status, 0) == host && WIFEXITED(status) && !WEXITSTATUS(status));
+  assert(waitpid(host, &status, 0) == host && WIFEXITED(status) && WEXITSTATUS(status) == 0x10);
   g_spawn_close_pid(host);
   assert(g_atomic_int_get(&server.closeCount) == 1);
   g_main_context_invoke(server.context, stop, &server); g_thread_join(thread);

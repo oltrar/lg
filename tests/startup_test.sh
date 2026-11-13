@@ -58,6 +58,8 @@ printf 'TEST: capture process started\n'
 EOF
 printf '#!/usr/bin/env bash\nprintf "TEST: guest GPU diagnostics\\n"\n' > "$ROOT/doctor.sh"
 chmod +x "$ROOT/_build/host/looking-glass-host"
+printf '#!/bin/sh\nexit 0\n' > "$ROOT/_build/lg-frame-check"
+chmod +x "$ROOT/_build/lg-frame-check"
 cat > "$ROOT/setup-ivshmem.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'TEST: device permissions %s\n' "$*" >> "$LG_TEST_LOG"
@@ -117,7 +119,6 @@ pattern=$(sed -n 's/^EnvironmentFile=//p' "$SERVICE")
 "$FIXTURE/envfile-path-test" "${pattern//%%/%}" "$OPTIONS"
 grep -Fxq 'LG_FPS=120' "$OPTIONS"
 
-# A warning with exit code zero must block installation and keep the old unit.
 # A stale managed file + an absent manager unit must not abort installation.
 : > "$LG_TEST_LOG"
 LG_TEST_LOAD_STATE=not-found LG_TEST_LOAD_RESULT=1 bash "$ROOT/setup-startup.sh" stop

@@ -87,7 +87,7 @@ write_file() {
 case $ACTION in
   enable|repair)
     require_session
-    [[ -x "$ROOT/_build/host/looking-glass-host" ]] || {
+    [[ -x "$ROOT/_build/host/looking-glass-host" && -x "$ROOT/_build/lg-frame-check" ]] || {
       printf 'Build and test capture first: bash build.sh; bash run-guest.sh\n' >&2; exit 1;
     }
     preflight
@@ -122,6 +122,9 @@ EnvironmentFile=$(env_file_pattern "$OPTIONS")
 ExecStart=/usr/bin/bash $(exec_quote "$ROOT/run-guest.sh")
 ExecStartPost=/usr/bin/bash $(exec_quote "$ROOT/check-video.sh")
 TimeoutStartSec=180
+# B7's Linux platform handles SIGINT and returns LG_HOST_EXIT_USER (0x10).
+KillSignal=SIGINT
+SuccessExitStatus=16
 Restart=no
 TimeoutStopSec=10
 EOF

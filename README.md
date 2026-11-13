@@ -64,6 +64,11 @@ This is experimental SDR capture. Tests exercise the real PipeWire and B7
 transport, but this development environment has no passed-through NVIDIA GPU.
 See [VALIDATION.md](VALIDATION.md) for exactly what was tested.
 
+This update also fixes a frame-publication crash: the previous heap snapshot
+could be aligned to only 16 bytes, while B7's AVX2 copy requires 32. Capture
+could therefore die after selecting a display and receiving its first frame.
+Snapshots now satisfy the actual B7 writer's alignment requirements.
+
 ## VM configuration (physical Linux host)
 
 Shut down the guest. Inside its libvirt `<devices>`, use:
@@ -271,7 +276,8 @@ Guest KWin/Mutter → local ScreenCast portal/PipeWire → owned raw pixel snaps
 → IVSHMEM/B7 LGMP → existing physical-host B7 client. This path uses no video
 codec or network video stream. SPICE supplies input/audio separately.
 
-Tests cover raw format negotiation, padded/offset MemFd buffers, ownership,
+Tests cover the old AVX2 alignment crash using the real B7 writer, raw format
+negotiation, padded/offset MemFd buffers, ownership,
 portal responses/restoration, unit generation/repair, installer flow and actual
 QEMU PCI BAR2 coherence without KVMFR. Additional CI runs a real PipeWire daemon,
 the full guest executable and a B7 LGMP client with no QXL, checks every received

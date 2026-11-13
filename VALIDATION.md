@@ -2,11 +2,24 @@
 
 ## Main installation, missing units, topology changes and real video — 2026-11-13
 
+The new full PipeWire-to-LGMP integration exposed a publication failure that
+the earlier stubbed framebuffer test could not detect. Production snapshots
+used realloc, which guarantees only 16-byte alignment on this platform. B7's
+framebuffer_write_avx2 uses _mm256_stream_load_si256 and requires 32-byte source
+alignment. Large allocations commonly have page+16 addresses. This can fault
+after the first successful capture copy, before the IVSHMEM-write log marker.
+Snapshots now use posix_memalign(32). A negative-control test forks the real B7
+writer with a deliberately 16-but-not-32-aligned input and requires SIGSEGV on
+AVX2 systems; the aligned input must publish matching bytes. Backend ingestion
+also asserts alignment, and the full live integration exercises actual writes.
+This is a demonstrated code defect, not hardware-specific proof from the user's
+VM. The old QXL image can still have been SPICE fallback throughout.
+
 The latest user retry still showed QXL and no NVIDIA feed after removing QXL.
 They also reported install.sh stopped with a service-not-found error. No actual
 capture-stage log from that retry is available; hardware causation is unproven.
 
-Three code paths could independently break this workflow:
+Three additional code paths could independently break this workflow:
 
 - start-session.sh called reset-failed before the unit had ever been loaded;
   unlike start, that operation does not load the unit. It now resets only an

@@ -41,6 +41,7 @@ struct pipewire
   /* Only the Looking Glass capture thread touches the snapshot. */
   uint8_t * snapshot;
   size_t capacity;
+  size_t frameHeaderSize;
   unsigned readyWidth, readyHeight, readyVersion, dataHeight;
   CaptureFormat readyFormat;
 };
@@ -192,6 +193,8 @@ static const struct pw_stream_events streamEvents = {
 };
 static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
 {
+  /* B7's per-frame allocation includes the page before FrameBuffer.data. */
+  this->frameHeaderSize = *alignSize;
   /* B7 deinitializes capture whenever its last LGMP client disconnects, even
    * immediately after initial setup. Keep the consent/session and chosen
    * monitor alive across that idle transition; resume the SAME stream. */
@@ -465,10 +468,13 @@ static CaptureResult pipewire_waitFrame(unsigned index, CaptureFrame * frame,
   const size_t maxFrameSize)
 {
   const size_t pitch = (size_t)this->readyWidth * 4;
-  if (!pitch || !this->readyHeight || maxFrameSize < pitch)
+  if (maxFrameSize < this->frameHeaderSize)
     return CAPTURE_RESULT_ERROR;
-  this->dataHeight = maxFrameSize / pitch < this->readyHeight ?
-    maxFrameSize / pitch : this->readyHeight;
+  const size_t payload = maxFrameSize - this->frameHeaderSize;
+  if (!pitch || !this->readyHeight || payload < pitch)
+    return CAPTURE_RESULT_ERROR;
+  this->dataHeight = payload / pitch < this->readyHeight ?
+    payload / pitch : this->readyHeight;
   *frame = (CaptureFrame){
     .formatVer = this->readyVersion,
     .screenWidth = this->readyWidth, .screenHeight = this->readyHeight,
@@ -485,7 +491,8 @@ static CaptureResult pipewire_getFrame(unsigned index, FrameBuffer * frame,
   const size_t maxFrameSize)
 {
   const size_t size = (size_t)this->readyWidth * 4 * this->dataHeight;
-  if (size > maxFrameSize || !this->snapshot)
+  if (maxFrameSize < this->frameHeaderSize ||
+      size > maxFrameSize - this->frameHeaderSize || !this->snapshot)
     return CAPTURE_RESULT_ERROR;
   if (!framebuffer_write(frame, this->snapshot, size))
     return CAPTURE_RESULT_ERROR;

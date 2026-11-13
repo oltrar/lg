@@ -47,6 +47,11 @@ int main(void)
   assert(frame.frameHeight == 3 && frame.screenHeight == 3);
   assert(pipewire_getFrame(0, NULL, 47) == CAPTURE_RESULT_OK);
   assert(copiedSize == 32 && copied[32] == 0xa5);
+  state.frameHeaderSize = 16;
+  assert(pipewire_waitFrame(0, &frame, 64) == CAPTURE_RESULT_OK && !frame.truncated);
+  assert(pipewire_waitFrame(0, &frame, 63) == CAPTURE_RESULT_OK && frame.dataHeight == 2);
+  assert(pipewire_getFrame(0, NULL, 47) == CAPTURE_RESULT_ERROR);
+  state.frameHeaderSize = 0;
   copiedSize = 0;
   assert(pipewire_getFrame(0, NULL, 31) == CAPTURE_RESULT_ERROR);
   assert(copiedSize == 0);

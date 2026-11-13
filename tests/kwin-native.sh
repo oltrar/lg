@@ -7,10 +7,10 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 if [[ ${1:-} != --inner ]]; then exec dbus-run-session -- bash "$0" --inner; fi
 FIXTURE=$(mktemp -d)
 cleanup() {
-  for process in "${HOST_PID:-}" "${KWIN_PID:-}" "${PW_PID:-}"; do
+  for process in "${HOST_PID:-}" "${KWIN_PID:-}" "${WP_PID:-}" "${PW_PID:-}"; do
     [[ -z $process ]] || kill "$process" 2>/dev/null || true
   done
-  for process in "${HOST_PID:-}" "${KWIN_PID:-}" "${PW_PID:-}"; do
+  for process in "${HOST_PID:-}" "${KWIN_PID:-}" "${WP_PID:-}" "${PW_PID:-}"; do
     [[ -z $process ]] || wait "$process" 2>/dev/null || true
   done
   rm -rf -- "$FIXTURE"
@@ -40,6 +40,7 @@ kbuildsycoca5 --noincremental
 cp -- /usr/bin/kwin_wayland "$FIXTURE/kwin_wayland"
 pipewire > "$FIXTURE/pipewire.log" 2>&1 & PW_PID=$!
 for ((n=0;n<100;n++)); do [[ ! -S $XDG_RUNTIME_DIR/pipewire-0 ]] || break; sleep .05; done
+wireplumber > "$FIXTURE/wireplumber.log" 2>&1 & WP_PID=$!
 connector=''
 for boot in 1 2; do
   "$FIXTURE/kwin_wayland" --virtual --no-lockscreen --width 320 --height 240 --socket lg-test \
@@ -56,7 +57,7 @@ for boot in 1 2; do
   "$ROOT/_build/host/looking-glass-host" "app:shmFile=$FIXTURE/shm" app:capture=pipewire \
     "pipewire:kdeOutput=$connector" > "$FIXTURE/host.log" 2>&1 & HOST_PID=$!
   if ! "$ROOT/_build/lg-frame-check" "$FIXTURE/shm" 30; then
-    cat "$FIXTURE/host.log" "$FIXTURE/kwin.log" "$FIXTURE/pipewire.log"; exit 1
+    cat "$FIXTURE/host.log" "$FIXTURE/kwin.log" "$FIXTURE/pipewire.log" "$FIXTURE/wireplumber.log"; exit 1
   fi
   kill -INT "$HOST_PID"
   code=0; wait "$HOST_PID" || code=$?

@@ -148,7 +148,7 @@ int main(int argc, char ** argv)
     .pipewireSocket = socketPath, .node = producer.node};
   g_mutex_init(&server.mutex); g_cond_init(&server.condition);
   GThread * thread = g_thread_new("portal-fixture", serve, &server);
-  struct KdeServer kdeServer = {.node = producer.node};
+  struct KdeServer kdeServer = {.node = producer.node, .refresh = 165000};
   if (native) startKdeServer(&kdeServer, false);
   g_mutex_lock(&server.mutex);
   gint64 deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;

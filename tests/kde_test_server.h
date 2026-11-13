@@ -16,6 +16,7 @@ struct KdeServer
   atomic_bool stop, capturedHdmi;
   atomic_int opened, closed;
   uint32_t node;
+  int refresh;
 };
 static void destroyResource(struct wl_client * client, struct wl_resource * resource)
 {
@@ -29,7 +30,8 @@ static void bindOutput(struct wl_client * client, void * data, uint32_t version,
   wl_resource_set_implementation(resource, &outputImpl, output, NULL);
   wl_output_send_geometry(resource, output->x, 0, 300, 200, WL_OUTPUT_SUBPIXEL_UNKNOWN,
     "Fixture", output->name, WL_OUTPUT_TRANSFORM_NORMAL);
-  wl_output_send_mode(resource, WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED, 320, 240, 60000);
+  wl_output_send_mode(resource, WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED, 320, 240,
+    output->server->refresh ? output->server->refresh : 60000);
   wl_output_send_scale(resource, 1);
   wl_output_send_name(resource, output->name);
   wl_output_send_description(resource, output->name);

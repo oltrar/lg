@@ -196,6 +196,13 @@ struct KDECapture * lgKdeCapture_open(const char * connector)
   return NULL;
 }
 uint32_t lgKdeCapture_node(struct KDECapture * c) { return c->node; }
+unsigned lgKdeCapture_refresh(struct KDECapture * c)
+{
+  for (unsigned i = 0; i < c->count; ++i)
+    if (c->outputs[i].global == c->selected && c->outputs[i].refresh > 0)
+      return (unsigned)c->outputs[i].refresh;
+  return 0;
+}
 bool lgKdeCapture_alive(struct KDECapture * c)
 {
   if (dispatch(c, 0) < 0) c->alive = false;

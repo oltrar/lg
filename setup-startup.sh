@@ -105,7 +105,7 @@ case $ACTION in
 # Startup-only settings, in systemd EnvironmentFile syntax (not a shell script).
 # Edit these, then run: bash setup-startup.sh restart
 LG_SHM=ivshmem
-LG_FPS=60
+LG_FPS=auto
 # Keep yes for automatic startup; use the choose-display command to change once.
 LG_CAPTURE_RESTORE=yes
 EOF
@@ -197,7 +197,7 @@ EOF
     # Stop only this project's managed unit; the chooser runs in the accessible
     # guest terminal so the user can see errors and use Ctrl+C after verifying.
     if managed "$SERVICE"; then stop_managed; fi
-    printf 'Choose the NVIDIA/dummy-plug monitor in the guest sharing dialog.\n'
+    printf 'Select the NVIDIA/dummy-plug monitor in the guest.\n'
     printf 'Stop any separate manual capture first. Press Ctrl+C when verified; then restart the startup service.\n'
     exec bash "$ROOT/run-guest.sh" --choose-display
     ;;

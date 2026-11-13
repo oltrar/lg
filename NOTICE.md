@@ -7,6 +7,16 @@ files, adds frame-layout helpers and a direct PCI IVSHMEM mapping path. Existing
 are retained. Added source, tests, scripts, examples and documentation are
 provided under GPL-2.0-or-later.
 
+The vendored zkde-screencast-unstable-v1.xml protocol retains its original
+SPDX copyright (Aleix Pol Gonzalez, 2020-2021) and LGPL-2.1-or-later license.
+It is copied from KDE plasma-wayland-protocols revision
+1db07441870d54157e937674b99380a7dcc0fb32:
+https://github.com/KDE/plasma-wayland-protocols/blob/1db07441870d54157e937674b99380a7dcc0fb32/src/protocols/zkde-screencast-unstable-v1.xml
+See licenses/LGPL-2.1-or-later.txt. The KDE native integration is specific to
+the compositor protocol and does not claim upstream KDE compatibility guarantees.
+The non-wire deprecated-since attribute is omitted so Debian's older
+wayland-scanner can validate the XML; the event description retains that notice.
+
 The build downloads Looking Glass and its pinned LGMP submodule. Those sources
 and their respective license files remain in _upstream/LookingGlass. Include
 the complete corresponding source and applicable notices if redistributing a

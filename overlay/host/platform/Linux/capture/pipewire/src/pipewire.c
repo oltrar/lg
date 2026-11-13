@@ -41,6 +41,7 @@ struct pipewire
   uint64_t copiedFrames, writtenFrames, copyNs, writeNs;
   uint64_t statsTime, statsReceived, statsCopied, statsWritten, statsCopyNs, statsWriteNs;
   unsigned width, height, formatVer;
+  unsigned requestedFPS;
   CaptureFormat format;
   /* Only the Looking Glass capture thread touches the snapshot. */
   uint8_t * snapshot;
@@ -55,17 +56,17 @@ static bool pipewire_shutdown(void);
 
 static bool fpsValidator(struct Option * opt, const char ** error)
 {
-  if (opt->value.x_int >= 1 && opt->value.x_int <= 360)
+  if (opt->value.x_int >= 0 && opt->value.x_int <= 360)
     return true;
-  *error = "PipeWire fps must be between 1 and 360";
+  *error = "PipeWire fps must be 0 (automatic) or between 1 and 360";
   return false;
 }
 static void pipewire_initOptions(void)
 {
   struct Option options[] = {
     {.module = "pipewire", .name = "fps",
-     .description = "Requested maximum capture rate (compositor may limit it)",
-     .type = OPTION_TYPE_INT, .value.x_int = 60, .validator = fpsValidator},
+     .description = "Maximum capture rate; 0 matches KDE output refresh (portal default 60)",
+     .type = OPTION_TYPE_INT, .value.x_int = 0, .validator = fpsValidator},
     {.module = "pipewire", .name = "restore",
      .description = "Reuse the saved monitor selection (no requests a fresh chooser)",
      .type = OPTION_TYPE_BOOL, .value.x_bool = true},
@@ -301,7 +302,13 @@ static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
   pw_stream_add_listener(this->stream, &this->streamListener, &streamEvents, NULL);
   uint8_t storage[1024];
   struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage, sizeof(storage));
-  const unsigned fps = option_get_int("pipewire", "fps");
+  unsigned fps = option_get_int("pipewire", "fps");
+  if (!fps && this->kde)
+    fps = (lgKdeCapture_refresh(this->kde) + 999) / 1000;
+  if (!fps) fps = 60;
+  if (fps > 360) fps = 360;
+  this->requestedFPS = fps;
+  DEBUG_INFO("Requested capture maximum: %u fps", fps);
   const struct spa_pod * format = lgPipewireFormat(&builder, fps);
   stage = "connecting the PipeWire capture stream";
   status = pw_stream_connect(this->stream, PW_DIRECTION_INPUT, node,
@@ -415,11 +422,11 @@ static void reportPerformance(void)
   double seconds = (now - this->statsTime) / 1e9;
   uint64_t copies = this->copiedFrames - this->statsCopied;
   uint64_t writes = this->writtenFrames - this->statsWritten;
-  DEBUG_INFO("Video rates: source=%.1f/s copied=%.1f/s uploaded=%.1f/s; copy=%.3f ms upload=%.3f ms; requested max=%d",
+  DEBUG_INFO("Video rates: source=%.1f/s copied=%.1f/s uploaded=%.1f/s; copy=%.3f ms upload=%.3f ms; requested max=%u",
     (this->receivedBuffers - this->statsReceived) / seconds, copies / seconds, writes / seconds,
     copies ? (this->copyNs - this->statsCopyNs) / (copies * 1e6) : 0.0,
     writes ? (this->writeNs - this->statsWriteNs) / (writes * 1e6) : 0.0,
-    option_get_int("pipewire", "fps"));
+    this->requestedFPS);
 reset:
   this->statsTime = now;
   this->statsReceived = this->receivedBuffers;

@@ -242,11 +242,14 @@ printf 'Virtual-1\t1920x1080\t60 Hz\tQXL\nHDMI-A-1\t2560x1440\t144 Hz\tNVIDIA du
 EOF
 chmod +x "$ROOT/_build/host/lg-kde-source"
 export LG_TEST_PROJECT="$ROOT" XDG_CURRENT_DESKTOP=KDE
+printf 'LG_SHM=ivshmem\nLG_FPS=60\nLG_CAPTURE_RESTORE=yes\n' > "$OPTIONS"
 printf '2\n' | SHELL=/bin/bash script -q -e -c 'bash "$LG_TEST_PROJECT/scripts/select-display.sh"' /dev/null
+grep -Fxq 'LG_FPS=auto' "$OPTIONS"
 [[ $(<"$XDG_CONFIG_HOME/looking-glass-linux-wayland/kde-output") == HDMI-A-1 ]]
 [[ $(stat -c %a "$XDG_CONFIG_HOME/looking-glass-linux-wayland/kde-output") == 600 ]]
 bash "$ROOT/run-guest.sh"
 grep -Fxq 'pipewire:kdeOutput=HDMI-A-1' "$LG_TEST_CAPTURE_LOG"
+grep -Fxq 'pipewire:fps=0' "$LG_TEST_CAPTURE_LOG"
 printf '#!/bin/sh\nexit 1\n' > "$ROOT/_build/host/lg-kde-source"
 bash "$ROOT/run-guest.sh"
 grep -Fxq 'pipewire:kdeOutput=HDMI-A-1' "$LG_TEST_CAPTURE_LOG"

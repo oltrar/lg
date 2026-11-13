@@ -13,14 +13,10 @@ Open a terminal **inside the guest KDE/GNOME Wayland desktop**, in your `lg`
 directory. Stop any manually running capture with Ctrl+C, then paste this block:
 
 ```bash
-git fetch origin
-git switch main
-git pull --ff-only origin main
-bash install.sh
+bash update.sh
 ```
 
-The switch to `main` above is a one-time return from the previous testing
-branches. **For future updates, run only `bash update.sh`.**
+This fetches **main** and runs the complete setup. No testing branch is needed.
 
 ### New installation
 
@@ -40,7 +36,9 @@ CachyOS/Arch packages or the IVSHMEM permission helper. It then:
 2. Installs persistent IVSHMEM permissions, including migration from the older
    rule that stopped matching if removing QXL changed the device's PCI address.
 3. Repairs and registers login startup.
-4. Opens a **fresh display chooser**. Choose the NVIDIA/dummy-plug monitor.
+4. On **KDE**, lists active connectors in the terminal. Enter the number of the
+   NVIDIA/dummy-plug output. Its connector is saved for unattended startup.
+   On **GNOME**, use the sharing dialog and allow restoring the choice.
 5. Waits for a complete B7 raw frame through shared memory before reporting
    setup complete. You do not need to start the physical-host client for this
    check. The service performs the same check after future logins.
@@ -51,9 +49,13 @@ your physical-host B7 client and confirm it shows that content. You can then
 shut down the VM, change its emulated video model to **None**, and boot again.
 The guest must automatically log into its Wayland desktop for unattended use.
 
-The selected portal/PipeWire session now survives the B7 host's idle period
-and client reconnects. Closing the client does not close the sharing session or
-open another chooser. Logging out or stopping the guest service closes it.
+**KDE startup no longer needs the portal chooser.** It uses KWin's native
+desktop capture interface with the saved connector (for example `HDMI-A-1`),
+so removing QXL or moving the screen to another desktop position does not
+change the selection. Setup registers this application's KDE capture capability;
+it does not turn off compositor permission checks. The native stream and
+GNOME's portal stream both survive client disconnects. Stopping the service or
+logging out closes capture.
 
 **A QXL picture alone is not proof of Looking Glass video.** B7 can show a
 SPICE fallback picture while raw capture is broken. Setup now checks the raw
@@ -67,7 +69,9 @@ See [VALIDATION.md](VALIDATION.md) for exactly what was tested.
 This update also fixes a frame-publication crash: the previous heap snapshot
 could be aligned to only 16 bytes, while B7's AVX2 copy requires 32. Capture
 could therefore die after selecting a display and receiving its first frame.
-Snapshots now satisfy the actual B7 writer's alignment requirements.
+Snapshots now satisfy the actual B7 writer's alignment requirements. The raw
+PCI transport also prefers Linux's **write-combining** BAR2 mapping for faster
+uploads, without requiring KVMFR.
 
 ## VM configuration (physical Linux host)
 
@@ -141,6 +145,43 @@ In the guest, choose the emulated **ICH9/Intel HDA** card for output and input,
 including in the application that records. NVIDIA HDMI audio is a different
 device. Leave SPICE enabled in the client; `-s` disables it.
 
+## Frame rate and performance
+
+In B7's Scroll Lock+D overlay, **UPS** counts guest frames uploaded by the
+client; **FPS** counts client rendering. A client can render 50 times per second
+while receiving only 24 new guest frames. Rendering FPS does not establish the
+capture rate. A 24 fps video or a static desktop can legitimately produce fewer
+updates; compare while an animation/game changes the whole screen.
+
+The guest now prefers `resource2_wc`, Linux's write-combining mapping of the
+prefetchable IVSHMEM BAR. The old ordinary/uncached mapping can be expensive for
+large pixel transfers. `install.sh` updates permissions for both aliases; no
+kernel module is needed. The log should show:
+
+```text
+PCI cache mode   : write-combining (resource2_wc)
+```
+
+If the kernel does not export/allow that mapping, capture uses the ordinary BAR
+and prints a warning. This is a compatibility fallback, not an equivalent
+performance path. Pixel stores are fenced before B7's ready-byte counter is
+published, including non-temporal writes to write-combining memory.
+
+Every five seconds of active capture, the guest logs `Video rates` with source,
+copied and uploaded frames/second, and average copy/upload milliseconds. Low
+source rate points to the compositor/display/content; slow upload time points
+to publication/transport. These timings exclude physical-host rendering and
+are diagnostic measurements, not a guaranteed rate.
+
+The default `LG_FPS=auto` matches the selected **KDE output's refresh**, up to
+360 fps (the portal path defaults to 60). The setup list shows the actual Hz;
+if it is 24/30 Hz, choose a faster mode in KDE Display Configuration first.
+Increasing the capture request does not change the display mode. Setup migrates
+the previous generated `LG_FPS=60` setting to `auto`; explicit other caps remain.
+You can set `LG_FPS=60`, `LG_FPS=120`, etc. afterward to cap CPU usage. CPU-copy
+capture, GPU readback and the host renderer can still limit the result. No fixed
+improvement to the reported 24 UPS is claimed without an actual guest retry.
+
 ## Startup and changing the display
 
 `install.sh` enables startup after login and starts capture immediately. Do not
@@ -166,14 +207,17 @@ To remove automatic startup:
 bash setup-startup.sh uninstall
 ```
 
-Uninstall stops the managed service and removes its unit/autostart entry. It
-keeps the repository, build, settings, saved display permission and reports.
+Uninstall stops the managed service and removes its unit/autostart entry and
+per-application KDE capability descriptors. It keeps the repository, build,
+settings, saved connector/portal choice and reports.
 Run `bash install.sh` to set it up again. There is no capture driver to uninstall.
 
 Wayland capture starts **after desktop login**; it cannot display the login or
-secure/lock screen. Configure automatic login separately if needed. Desktop
-policy can require a new sharing confirmation after permissions/output changes.
-The application cannot bypass that policy.
+secure/lock screen. Configure automatic login separately if needed. GNOME uses
+portal permissions and can require a new confirmation under its desktop policy.
+KDE native mode is a local desktop integration; it does not need a portal
+restore token. A missing/disabled saved connector fails clearly rather than
+silently selecting QXL or opening a hidden startup dialog.
 
 ## If setup or video fails
 
@@ -218,13 +262,13 @@ them manually:
 
 ```bash
 sudo pacman -S --needed base-devel git cmake ninja pkgconf pipewire glib2 dbus \
-  xdg-desktop-portal xdg-desktop-portal-kde pciutils desktop-file-utils
+  wayland xdg-desktop-portal xdg-desktop-portal-kde pciutils desktop-file-utils
 ```
 
 For GNOME use `xdg-desktop-portal-gnome` instead of the KDE backend. Both may
 coexist. Other distributions need equivalent compiler, CMake/Ninja, GLib/GIO,
-PipeWire/SPA development headers, D-Bus, systemd and desktop-entry tools, plus
-their desktop's portal backend.
+PipeWire/SPA and Wayland client/server development headers, wayland-scanner,
+D-Bus, systemd and desktop-entry tools, plus their desktop's portal backend.
 
 The default permission rule auto-discovers exactly one IVSHMEM device, so it
 continues to work if removing QXL renumbers PCI devices. Multiple IVSHMEM devices
@@ -246,18 +290,26 @@ Startup settings use systemd EnvironmentFile syntax:
 
 ```ini
 LG_SHM=ivshmem
-LG_FPS=60
+LG_FPS=auto
 LG_CAPTURE_RESTORE=yes
 ```
 
-Keep restore=yes for unattended login. `LG_FPS` accepts 1–360; actual cadence is
+Keep restore=yes for unattended login (KDE uses its saved connector).
+`LG_FPS` accepts `auto` or 1–360; actual cadence is
 compositor-dependent. After editing, run `bash setup-startup.sh restart`.
 
 Manual capture remains available with `bash run-guest.sh`, or
-`bash run-guest.sh --choose-display` for a fresh chooser. Stop the service first.
+`bash run-guest.sh --choose-display` for a fresh selection. Stop the service first.
 Manual runs use your terminal's `LG_SHM`/`LG_FPS` values, not the service options
 file. `bash check-video.sh` can verify raw publication while capture is running;
 set `LG_SHM` when using a custom device.
+
+The KDE connector is saved in
+`~/.config/looking-glass-linux-wayland/kde-output`. `LG_KDE_OUTPUT=HDMI-A-1`
+is an explicit manual override. Removing that file returns manual KDE launches
+to portal selection. Native KDE capture uses a compositor-specific protocol;
+its compatibility is tested separately and cannot be promised for every future
+KWin release. GNOME continues using the portable portal backend.
 
 To remove the persistent permission helper, delete only
 `/etc/udev/rules.d/70-lg-ivshmem.rules` and
@@ -272,7 +324,8 @@ applies this GPL-2.0-or-later overlay. The executable is
 Build records identify source and binary changes. Unknown edits in the upstream
 build tree are preserved and stop overlay upgrades.
 
-Guest KWin/Mutter → local ScreenCast portal/PipeWire → owned raw pixel snapshot
+Guest KWin native capture or Mutter's ScreenCast portal → local raw PipeWire
+buffers → owned pixel snapshot
 → IVSHMEM/B7 LGMP → existing physical-host B7 client. This path uses no video
 codec or network video stream. SPICE supplies input/audio separately.
 
@@ -281,8 +334,12 @@ negotiation, padded/offset MemFd buffers, ownership,
 portal responses/restoration, unit generation/repair, installer flow and actual
 QEMU PCI BAR2 coherence without KVMFR. Additional CI runs a real PipeWire daemon,
 the full guest executable and a B7 LGMP client with no QXL, checks every received
-pixel and reconnects clients repeatedly. Its compositor/portal UI is a fixture;
-it does not test an NVIDIA GPU or real KDE/GNOME session. See
+pixel and reconnects clients repeatedly on portal and native KDE paths. A real
+Wayland protocol fixture checks connector restoration after QXL removal,
+compositor restart and position changes. Additional CI exercises a real KWin
+software/virtual compositor across two starts with its permission checks left
+enabled. These tests do not contain a passed-through NVIDIA GPU or a real GNOME
+desktop. See
 [VALIDATION.md](VALIDATION.md).
 
 Material limits: one monitor, SDR, CPU copies, embedded cursor, no native
@@ -296,5 +353,6 @@ hardware, sound and concurrent host/guest microphone use need guest validation.
 - [QEMU IVSHMEM](https://www.qemu.org/docs/master/system/devices/ivshmem.html)
 - [Linux PCI sysfs mapping](https://www.kernel.org/doc/html/latest/PCI/sysfs-pci.html)
 - [PipeWire threaded loop](https://docs.pipewire.org/page_thread_loop.html)
+- [KDE capture protocol](https://invent.kde.org/libraries/plasma-wayland-protocols/-/blob/master/src/protocols/zkde-screencast-unstable-v1.xml)
 
 See [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).

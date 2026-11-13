@@ -5,6 +5,7 @@
 struct KDECapture;
 struct KDECapture * lgKdeCapture_open(const char * connector);
 uint32_t lgKdeCapture_node(struct KDECapture * capture);
+unsigned lgKdeCapture_refresh(struct KDECapture * capture);
 bool lgKdeCapture_alive(struct KDECapture * capture);
 void lgKdeCapture_close(struct KDECapture * capture);
 int lgKdeCapture_list(void);

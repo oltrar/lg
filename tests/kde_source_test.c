@@ -17,6 +17,7 @@ int main(void)
     assert(!lgKdeCapture_open("not-connected"));
     struct KDECapture * c = lgKdeCapture_open("HDMI-A-1");
     assert(c && lgKdeCapture_node(c) == 42 + boot && lgKdeCapture_alive(c));
+    assert(lgKdeCapture_refresh(c) == 60000);
     assert(atomic_load(&server.capturedHdmi) && atomic_load(&server.opened) == 1);
     lgKdeCapture_close(c);
     for (unsigned n = 0; n < 100 && atomic_load(&server.closed) != 1; ++n) usleep(1000);

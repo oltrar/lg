@@ -83,7 +83,7 @@
         <event name="closed">
             <description summary="Notifies that the server has stopped the stream. Clients should now call close."/>
         </event>
-        <event name="created" deprecated-since="6">
+        <event name="created">
             <description summary="Notifies about a pipewire feed being created">
                 Deprecated since version 6, use the object serial from the serial event instead
             </description>

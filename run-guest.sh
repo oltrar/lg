@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 BINARY=${LG_BINARY:-"$ROOT/_build/host/looking-glass-host"}
 DEVICE=${LG_SHM:-ivshmem}
-FPS=${LG_FPS:-60}
+FPS=${LG_FPS:-auto}
 RESTORE=${LG_CAPTURE_RESTORE:-yes}
 CHOOSE_NEXT=${XDG_CONFIG_HOME:-"$HOME/.config"}/looking-glass-linux-wayland/choose-next
 if [[ -f $CHOOSE_NEXT && ! -L $CHOOSE_NEXT && -O $CHOOSE_NEXT ]]; then
@@ -44,9 +44,13 @@ fi
 [[ -n ${DBUS_SESSION_BUS_ADDRESS:-} ]] || {
   printf 'No desktop session bus; launch from the guest desktop, without sudo.\n' >&2; exit 1;
 }
-[[ $FPS =~ ^[0-9]{1,3}$ ]] && ((10#$FPS >= 1 && 10#$FPS <= 360)) || {
-  printf 'LG_FPS must be an integer from 1 to 360.\n' >&2; exit 1;
-}
+if [[ $FPS == auto ]]; then
+  REQUEST_FPS=0
+elif [[ $FPS =~ ^[0-9]{1,3}$ ]] && ((10#$FPS >= 1 && 10#$FPS <= 360)); then
+  REQUEST_FPS=$((10#$FPS))
+else
+  printf 'LG_FPS must be auto or an integer from 1 to 360.\n' >&2; exit 1;
+fi
 [[ $RESTORE == yes || $RESTORE == no ]] || {
   printf 'LG_CAPTURE_RESTORE must be yes or no. Use --choose-display to reselect once.\n' >&2; exit 1;
 }
@@ -66,5 +70,5 @@ if [[ $DEVICE != ivshmem && $DEVICE != ivshmem:* ]]; then
     exit 1
   }
 fi
-exec "$BINARY" "app:shmFile=$DEVICE" app:capture=pipewire "pipewire:fps=$FPS" \
+exec "$BINARY" "app:shmFile=$DEVICE" app:capture=pipewire "pipewire:fps=$REQUEST_FPS" \
   "pipewire:restore=$RESTORE" "pipewire:kdeOutput=$KDE_OUTPUT" "${arguments[@]}"

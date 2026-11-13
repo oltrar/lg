@@ -34,11 +34,15 @@ X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1
 EOF
 done
 kbuildsycoca5 --noincremental
+# Debian's executable has cap_sys_nice; Docker's bounding set omits it, so
+# execve returns EPERM. A byte-identical temporary copy has no file capability
+# and can use ordinary scheduling. Compositor capture checks remain enabled.
+cp -- /usr/bin/kwin_wayland "$FIXTURE/kwin_wayland"
 pipewire > "$FIXTURE/pipewire.log" 2>&1 & PW_PID=$!
 for ((n=0;n<100;n++)); do [[ ! -S $XDG_RUNTIME_DIR/pipewire-0 ]] || break; sleep .05; done
 connector=''
 for boot in 1 2; do
-  kwin_wayland --virtual --no-lockscreen --width 320 --height 240 --socket lg-test \
+  "$FIXTURE/kwin_wayland" --virtual --no-lockscreen --width 320 --height 240 --socket lg-test \
     > "$FIXTURE/kwin.log" 2>&1 & KWIN_PID=$!
   ready=0
   for ((n=0;n<100;n++)); do
@@ -46,7 +50,7 @@ for boot in 1 2; do
        "$ROOT/_build/host/lg-kde-source" > "$FIXTURE/outputs" 2> "$FIXTURE/list.log"; then ready=1; break; fi
     sleep .1
   done
-  if (( ! ready )); then cat "$FIXTURE/kwin.log" "$FIXTURE/list.log"; exit 1; fi
+  if (( ! ready )); then cat "$FIXTURE/kwin.log" "$FIXTURE/list.log" 2>/dev/null || true; exit 1; fi
   if [[ -z $connector ]]; then IFS=$'\t' read -r connector rest < "$FIXTURE/outputs"; fi
   truncate -s 0 "$FIXTURE/shm"; truncate -s 64M "$FIXTURE/shm"
   "$ROOT/_build/host/looking-glass-host" "app:shmFile=$FIXTURE/shm" app:capture=pipewire \

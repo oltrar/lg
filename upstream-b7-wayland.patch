@@ -566,7 +566,7 @@ diff --git a/host/platform/Linux/capture/pipewire/src/kde_capture.c b/host/platf
 new file mode 100644
 --- /dev/null
 +++ b/host/platform/Linux/capture/pipewire/src/kde_capture.c
-@@ -0,0 +1,230 @@
+@@ -0,0 +1,237 @@
 +/* SPDX-License-Identifier: GPL-2.0-or-later */
 +/* KDE-specific native desktop integration. The compositor authorizes this
 + * executable using its own per-application Wayland capability policy. Never
@@ -765,6 +765,13 @@ new file mode 100644
 +  return NULL;
 +}
 +uint32_t lgKdeCapture_node(struct KDECapture * c) { return c->node; }
++unsigned lgKdeCapture_refresh(struct KDECapture * c)
++{
++  for (unsigned i = 0; i < c->count; ++i)
++    if (c->outputs[i].global == c->selected && c->outputs[i].refresh > 0)
++      return (unsigned)c->outputs[i].refresh;
++  return 0;
++}
 +bool lgKdeCapture_alive(struct KDECapture * c)
 +{
 +  if (dispatch(c, 0) < 0) c->alive = false;
@@ -801,7 +808,7 @@ diff --git a/host/platform/Linux/capture/pipewire/src/kde_capture.h b/host/platf
 new file mode 100644
 --- /dev/null
 +++ b/host/platform/Linux/capture/pipewire/src/kde_capture.h
-@@ -0,0 +1,10 @@
+@@ -0,0 +1,11 @@
 +/* SPDX-License-Identifier: GPL-2.0-or-later */
 +#pragma once
 +#include <stdbool.h>
@@ -809,6 +816,7 @@ new file mode 100644
 +struct KDECapture;
 +struct KDECapture * lgKdeCapture_open(const char * connector);
 +uint32_t lgKdeCapture_node(struct KDECapture * capture);
++unsigned lgKdeCapture_refresh(struct KDECapture * capture);
 +bool lgKdeCapture_alive(struct KDECapture * capture);
 +void lgKdeCapture_close(struct KDECapture * capture);
 +int lgKdeCapture_list(void);
@@ -828,7 +836,7 @@ new file mode 100644
 diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform/Linux/capture/pipewire/src/pipewire.c
 --- a/host/platform/Linux/capture/pipewire/src/pipewire.c
 +++ b/host/platform/Linux/capture/pipewire/src/pipewire.c
-@@ -1,493 +1,571 @@
+@@ -1,493 +1,578 @@
  /**
   * Looking Glass
 - * Copyright © 2017-2025 The Looking Glass Authors
@@ -902,6 +910,7 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +  uint64_t copiedFrames, writtenFrames, copyNs, writeNs;
 +  uint64_t statsTime, statsReceived, statsCopied, statsWritten, statsCopyNs, statsWriteNs;
 +  unsigned width, height, formatVer;
++  unsigned requestedFPS;
 +  CaptureFormat format;
 +  /* Only the Looking Glass capture thread touches the snapshot. */
 +  uint8_t * snapshot;
@@ -935,17 +944,17 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -
 +static bool fpsValidator(struct Option * opt, const char ** error)
 +{
-+  if (opt->value.x_int >= 1 && opt->value.x_int <= 360)
++  if (opt->value.x_int >= 0 && opt->value.x_int <= 360)
 +    return true;
-+  *error = "PipeWire fps must be between 1 and 360";
++  *error = "PipeWire fps must be 0 (automatic) or between 1 and 360";
 +  return false;
 +}
 +static void pipewire_initOptions(void)
 +{
 +  struct Option options[] = {
 +    {.module = "pipewire", .name = "fps",
-+     .description = "Requested maximum capture rate (compositor may limit it)",
-+     .type = OPTION_TYPE_INT, .value.x_int = 60, .validator = fpsValidator},
++     .description = "Maximum capture rate; 0 matches KDE output refresh (portal default 60)",
++     .type = OPTION_TYPE_INT, .value.x_int = 0, .validator = fpsValidator},
 +    {.module = "pipewire", .name = "restore",
 +     .description = "Reuse the saved monitor selection (no requests a fresh chooser)",
 +     .type = OPTION_TYPE_BOOL, .value.x_bool = true},
@@ -1191,7 +1200,13 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +  pw_stream_add_listener(this->stream, &this->streamListener, &streamEvents, NULL);
 +  uint8_t storage[1024];
 +  struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage, sizeof(storage));
-+  const unsigned fps = option_get_int("pipewire", "fps");
++  unsigned fps = option_get_int("pipewire", "fps");
++  if (!fps && this->kde)
++    fps = (lgKdeCapture_refresh(this->kde) + 999) / 1000;
++  if (!fps) fps = 60;
++  if (fps > 360) fps = 360;
++  this->requestedFPS = fps;
++  DEBUG_INFO("Requested capture maximum: %u fps", fps);
 +  const struct spa_pod * format = lgPipewireFormat(&builder, fps);
 +  stage = "connecting the PipeWire capture stream";
 +  status = pw_stream_connect(this->stream, PW_DIRECTION_INPUT, node,
@@ -1644,11 +1659,11 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +  double seconds = (now - this->statsTime) / 1e9;
 +  uint64_t copies = this->copiedFrames - this->statsCopied;
 +  uint64_t writes = this->writtenFrames - this->statsWritten;
-+  DEBUG_INFO("Video rates: source=%.1f/s copied=%.1f/s uploaded=%.1f/s; copy=%.3f ms upload=%.3f ms; requested max=%d",
++  DEBUG_INFO("Video rates: source=%.1f/s copied=%.1f/s uploaded=%.1f/s; copy=%.3f ms upload=%.3f ms; requested max=%u",
 +    (this->receivedBuffers - this->statsReceived) / seconds, copies / seconds, writes / seconds,
 +    copies ? (this->copyNs - this->statsCopyNs) / (copies * 1e6) : 0.0,
 +    writes ? (this->writeNs - this->statsWriteNs) / (writes * 1e6) : 0.0,
-+    option_get_int("pipewire", "fps"));
++    this->requestedFPS);
 +reset:
 +  this->statsTime = now;
 +  this->statsReceived = this->receivedBuffers;
@@ -2634,7 +2649,7 @@ new file mode 100644
 +        <event name="closed">
 +            <description summary="Notifies that the server has stopped the stream. Clients should now call close."/>
 +        </event>
-+        <event name="created" deprecated-since="6">
++        <event name="created">
 +            <description summary="Notifies about a pipewire feed being created">
 +                Deprecated since version 6, use the object serial from the serial event instead
 +            </description>

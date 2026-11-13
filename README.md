@@ -8,6 +8,13 @@ Wayland, and a Looking Glass **B7** client on the physical Linux host.
 implemented. See [limitations](#material-limitations) and
 [validation](VALIDATION.md) before using it.
 
+**Current hardware report:** the user still gets no NVIDIA-output feed after
+removing QXL, including after choosing the right monitor. The chooser alone
+did not resolve that failure. This revision fixes a separately reproduced
+BGRA negotiation bug and saves diagnostic reports automatically; the actual
+NVIDIA-only setup still needs verification. See
+[QXL works but the NVIDIA feed does not](#qxl-works-but-the-nvidia-feed-does-not).
+
 ## 1. Guest dependencies — no KVMFR required
 
 The preferred video transport is **plain IVSHMEM**, using the VM XML in step 3.
@@ -230,6 +237,65 @@ Wayland input-injection APIs. Adjust guest mouse acceleration if needed.
 
 Stop manual capture with Ctrl+C. The optional startup setup below runs capture
 in your graphical user session.
+
+### QXL works but the NVIDIA feed does not
+
+Keyboard/mouse use SPICE independently of shared-memory video. B7 can also
+display QXL through its **SPICE video fallback**, even when the guest capture
+application produces no LG frames. A QXL picture plus working input therefore
+does not establish that the raw-video path is working. Check the B7 fallback
+indicator and the guest capture log. This behavior is documented by
+[upstream Looking Glass](https://looking-glass.io/docs/B7/install_libvirt/).
+
+A confirmed bug in earlier versions advertised BGRA as the preferred format
+but omitted it from the allowed SPA enum alternatives. A BGRA-only producer
+was therefore rejected by PipeWire's real format filter. This revision fixes
+the enum, negotiates the maximum frame rate separately, and logs the first
+received buffer, successful pixel copy, and IVSHMEM write. This is a proven
+negotiation fix, **not confirmation of the cause of every NVIDIA failure**.
+The capture path still requests CPU-readable MemFd/MemPtr buffers; it does not
+interpret GPU DMA-BUFs as linear CPU memory.
+
+You do not need SSH or a working screen on the failed boot to collect the next
+capture attempt. Every capture launch through `run-guest.sh`, including login startup,
+automatically creates a new private directory under:
+
+```text
+~/.local/state/looking-glass-linux-wayland/reports/
+```
+
+If `XDG_STATE_HOME` is set, the path is
+`$XDG_STATE_HOME/looking-glass-linux-wayland/reports/` instead. Each timestamped
+directory contains `capture.log` and `diagnostics.log`. The former records
+launch/session settings and the capture application's output; the latter
+records bounded read-only checks for PCI/DRM outputs, kernel, services, portal
+and NVIDIA model/driver when available. Files are mode 0600 in a mode 0700
+directory. Restore-token files are not collected. Terminal and journal logging
+continue normally. Reports from previous launches/boots are kept separately.
+
+When you next have access to the VM:
+
+1. With QXL enabled, update/rebuild this revision, stop any older capture, and
+   start the updated application. If startup is installed, use
+   `bash setup-startup.sh stop` before building and
+   `bash setup-startup.sh start` afterward. Use the monitor chooser below if
+   needed. The log should reach **`First raw frame written to IVSHMEM`**;
+   merely opening the monitor chooser or reaching `Capture Start` is insufficient.
+2. Test the NVIDIA-only boot. If no feed appears, shut down the guest using your
+   normal VM controls, restore QXL, and boot back into the guest desktop.
+3. Open the reports folder in the guest file manager. Keep the timestamped
+   report from the **failed attempt**, rather than only the later QXL boot's
+   report. Its UTC time and boot ID are in `capture.log`. Copy the two log files
+   somewhere you can read after shutting down the VM, then share their text
+   when you can return to this chat. No simultaneous chat/VM access is required.
+
+If there is **no report for the failed boot**, this launcher did not run far
+enough to create one, or could not write the state directory. Check whether
+the guest reached a logged-in Wayland desktop and whether its user startup
+service ran. Capture cannot show the login screen before the user session
+starts. If the report names a portal failure, an IVSHMEM permission failure,
+or rejected buffers, keep that specific error; choosing a monitor again does
+not fix all of these stages.
 
 ### Choose the NVIDIA/dummy-plug display
 

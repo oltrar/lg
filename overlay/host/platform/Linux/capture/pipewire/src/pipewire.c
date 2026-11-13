@@ -9,11 +9,13 @@
  */
 #include "portal.h"
 #include "frame_layout.h"
+#include "format_params.h"
 #include "interface/capture.h"
 #include "common/debug.h"
 #include "common/option.h"
 #include <errno.h>
 #include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 #include <pipewire/pipewire.h>
 #include <spa/buffer/meta.h>
@@ -32,6 +34,8 @@ struct pipewire
   struct pw_buffer * pending;
   /* Live state is protected by the PipeWire loop lock. */
   bool started, stop, failed, hasFormat, connected, warnedBuffer;
+  bool loggedBuffer, loggedCopy, loggedWrite, warnedNoFrame;
+  uint64_t captureStartedAt, receivedBuffers, rejectedBuffers;
   unsigned width, height, formatVer;
   CaptureFormat format;
   /* Only the Looking Glass capture thread touches the snapshot. */
@@ -97,6 +101,14 @@ static void streamProcess(void * opaque)
   struct pw_buffer * buffer;
   while ((buffer = pw_stream_dequeue_buffer(this->stream)))
   {
+    ++this->receivedBuffers;
+    if (!this->loggedBuffer && buffer->buffer && buffer->buffer->n_datas && buffer->buffer->datas)
+    {
+      const struct spa_data * data = &buffer->buffer->datas[0];
+      DEBUG_INFO("First PipeWire buffer: planes=%u type=%u mapped=%s capacity=%u",
+        buffer->buffer->n_datas, data->type, data->data ? "yes" : "no", data->maxsize);
+      this->loggedBuffer = true;
+    }
     discardPending();
     this->pending = buffer;
   }
@@ -135,6 +147,11 @@ static void streamFormat(void * opaque, uint32_t id, const struct spa_pod * para
       !info.size.width || !info.size.height ||
       info.size.width > 8192 || info.size.height > 8192)
     goto unsupported;
+  if (spa_pod_find_prop(param, NULL, SPA_FORMAT_VIDEO_modifier))
+  {
+    DEBUG_ERROR("Unexpected DMA-BUF modifier: this capture path requires CPU-readable MemFd/MemPtr buffers");
+    goto unsupported;
+  }
   switch (info.format)
   {
     case SPA_VIDEO_FORMAT_BGRA:
@@ -149,10 +166,7 @@ static void streamFormat(void * opaque, uint32_t id, const struct spa_pod * para
   this->hasFormat = true;
   uint8_t storage[512];
   struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage, sizeof(storage));
-  const struct spa_pod * buffers = spa_pod_builder_add_object(&builder,
-    SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
-    SPA_PARAM_BUFFERS_dataType,
-      SPA_POD_Int((1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_MemFd)));
+  const struct spa_pod * buffers = lgPipewireBuffers(&builder);
   if (pw_stream_update_params(this->stream, &buffers, 1) < 0)
     goto unsupported;
   DEBUG_INFO("Raw SDR capture: %ux%u, format %u", this->width,
@@ -160,7 +174,8 @@ static void streamFormat(void * opaque, uint32_t id, const struct spa_pod * para
   pw_thread_loop_signal(this->loop, false);
   return;
 unsupported:
-  DEBUG_ERROR("Unsupported PipeWire format or geometry; use an SDR output");
+  DEBUG_ERROR("Unsupported PipeWire raw format/geometry/memory: format=%u size=%ux%u",
+    info.format, info.size.width, info.size.height);
   this->failed = true;
   pw_thread_loop_signal(this->loop, false);
 }
@@ -174,6 +189,8 @@ static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
   const char * stage = "opening the desktop portal";
   this->stop = this->failed = this->hasFormat = this->connected = false;
   this->warnedBuffer = false;
+  this->loggedBuffer = this->loggedCopy = this->loggedWrite = this->warnedNoFrame = false;
+  this->captureStartedAt = this->receivedBuffers = this->rejectedBuffers = 0;
   this->readyWidth = this->readyHeight = 0;
   this->portal = portal_create();
   if (!this->portal)
@@ -240,17 +257,7 @@ static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
   uint8_t storage[1024];
   struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage, sizeof(storage));
   const unsigned fps = option_get_int("pipewire", "fps");
-  const struct spa_pod * format = spa_pod_builder_add_object(&builder,
-    SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
-    SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-    SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-    SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(4,
-      SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA,
-      SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx),
-    SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(
-      &SPA_RECTANGLE(1920, 1080), &SPA_RECTANGLE(1, 1), &SPA_RECTANGLE(8192, 8192)),
-    SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(
-      &SPA_FRACTION(fps, 1), &SPA_FRACTION(0, 1), &SPA_FRACTION(fps, 1)));
+  const struct spa_pod * format = lgPipewireFormat(&builder, fps);
   stage = "connecting the PipeWire capture stream";
   status = pw_stream_connect(this->stream, PW_DIRECTION_INPUT, node,
         PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, &format, 1);
@@ -322,49 +329,59 @@ static void pipewire_free(void)
   this = NULL;
   pw_deinit();
 }
-static CaptureResult pipewire_capture(unsigned index, FrameBuffer * target)
+static void reportNoFrame(void)
 {
-  pw_thread_loop_lock(this->loop);
-  struct timespec deadline;
-  pw_thread_loop_get_time(this->loop, &deadline, SPA_NSEC_PER_SEC);
-  while ((!this->pending || !this->hasFormat) && !this->stop && !this->failed)
-    if (pw_thread_loop_timed_wait_full(this->loop, &deadline) < 0)
-    {
-      pw_thread_loop_unlock(this->loop);
-      return CAPTURE_RESULT_TIMEOUT;
-    }
-  CaptureResult result = CAPTURE_RESULT_TIMEOUT;
-  if (this->stop || this->failed)
+  struct timespec now;
+  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+    return;
+  const uint64_t ns = (uint64_t)now.tv_sec * SPA_NSEC_PER_SEC + now.tv_nsec;
+  if (!this->captureStartedAt)
+    this->captureStartedAt = ns;
+  if (!this->loggedCopy && !this->warnedNoFrame &&
+      ns - this->captureStartedAt >= 10 * SPA_NSEC_PER_SEC)
   {
-    result = this->failed ? CAPTURE_RESULT_ERROR : CAPTURE_RESULT_REINIT;
-    goto done;
+    DEBUG_WARN("No usable raw frame after 10 seconds: received=%llu rejected=%llu negotiated=%s",
+      (unsigned long long)this->receivedBuffers,
+      (unsigned long long)this->rejectedBuffers, this->hasFormat ? "yes" : "no");
+    this->warnedNoFrame = true;
   }
-  struct spa_buffer * buffer = this->pending->buffer;
+}
+static CaptureResult rejectBuffer(const char * reason, const struct spa_data * data)
+{
+  ++this->rejectedBuffers;
+  if (!this->warnedBuffer)
+    DEBUG_WARN("Rejected raw buffer (%s): type=%u mapped=%s capacity=%u offset=%u size=%u stride=%d flags=%u",
+      reason, data ? data->type : 0, data && data->data ? "yes" : "no",
+      data ? data->maxsize : 0, data && data->chunk ? data->chunk->offset : 0,
+      data && data->chunk ? data->chunk->size : 0,
+      data && data->chunk ? data->chunk->stride : 0,
+      data && data->chunk ? data->chunk->flags : 0);
+  this->warnedBuffer = true;
+  return CAPTURE_RESULT_TIMEOUT;
+}
+/* Caller holds the loop lock. Keep this separate from dequeuing so tests can
+ * exercise real mapped MemFd buffers and ownership without a compositor. */
+static CaptureResult copyBuffer(struct spa_buffer * buffer)
+{
+  if (!buffer || buffer->n_datas != 1 || !buffer->datas)
+    return rejectBuffer("expected one CPU-readable plane", NULL);
+  struct spa_data * data = &buffer->datas[0];
   struct spa_meta_header * header = spa_buffer_find_meta_data(buffer,
     SPA_META_Header, sizeof(*header));
-  if (!buffer->n_datas || (header && (header->flags & SPA_META_HEADER_FLAG_CORRUPTED)))
-    goto done;
-  struct spa_data * data = &buffer->datas[0];
+  if (header && (header->flags & SPA_META_HEADER_FLAG_CORRUPTED))
+    return rejectBuffer("corrupted/empty header", data);
   struct LGFrameLayout layout;
   if (!data->data || !data->chunk ||
       (data->type != SPA_DATA_MemPtr && data->type != SPA_DATA_MemFd) ||
       (data->chunk->flags & SPA_CHUNK_FLAG_CORRUPTED) ||
       !lgFrameLayout(&layout, this->width, this->height, data->maxsize,
         data->chunk->offset, data->chunk->size, data->chunk->stride))
-  {
-    if (!this->warnedBuffer)
-      DEBUG_WARN("Dropping unmapped, empty or unsupported PipeWire buffer layout");
-    this->warnedBuffer = true;
-    goto done;
-  }
+    return rejectBuffer("unmapped, unsupported or out-of-bounds layout", data);
   if (layout.packedSize > this->capacity)
   {
     uint8_t * memory = realloc(this->snapshot, layout.packedSize);
     if (!memory)
-    {
-      result = CAPTURE_RESULT_ERROR;
-      goto done;
-    }
+      return CAPTURE_RESULT_ERROR;
     this->snapshot = memory;
     this->capacity = layout.packedSize;
   }
@@ -374,8 +391,36 @@ static CaptureResult pipewire_capture(unsigned index, FrameBuffer * target)
   this->readyHeight = this->height;
   this->readyVersion = this->formatVer;
   this->readyFormat = this->format;
-  this->warnedBuffer = false;
-  result = CAPTURE_RESULT_OK;
+  if (!this->loggedCopy)
+  {
+    DEBUG_INFO("First raw frame copied: %ux%u, %zu bytes; waiting for IVSHMEM publication",
+      this->readyWidth, this->readyHeight, layout.packedSize);
+    this->loggedCopy = true;
+  }
+  return CAPTURE_RESULT_OK;
+}
+static CaptureResult pipewire_capture(unsigned index, FrameBuffer * target)
+{
+  pw_thread_loop_lock(this->loop);
+  reportNoFrame();
+  struct timespec deadline;
+  pw_thread_loop_get_time(this->loop, &deadline, SPA_NSEC_PER_SEC);
+  while ((!this->pending || !this->hasFormat) && !this->stop && !this->failed)
+    if (pw_thread_loop_timed_wait_full(this->loop, &deadline) < 0)
+    {
+      reportNoFrame();
+      pw_thread_loop_unlock(this->loop);
+      return CAPTURE_RESULT_TIMEOUT;
+    }
+  CaptureResult result;
+  if (this->stop || this->failed)
+  {
+    result = this->failed ? CAPTURE_RESULT_ERROR : CAPTURE_RESULT_REINIT;
+    goto done;
+  }
+  result = copyBuffer(this->pending->buffer);
+  if (result == CAPTURE_RESULT_TIMEOUT)
+    reportNoFrame();
 done:
   discardPending();
   pw_thread_loop_unlock(this->loop);
@@ -407,8 +452,16 @@ static CaptureResult pipewire_getFrame(unsigned index, FrameBuffer * frame,
   const size_t size = (size_t)this->readyWidth * 4 * this->dataHeight;
   if (size > maxFrameSize || !this->snapshot)
     return CAPTURE_RESULT_ERROR;
-  return framebuffer_write(frame, this->snapshot, size) ?
-    CAPTURE_RESULT_OK : CAPTURE_RESULT_ERROR;
+  if (!framebuffer_write(frame, this->snapshot, size))
+    return CAPTURE_RESULT_ERROR;
+  if (!this->loggedWrite)
+  {
+    DEBUG_INFO("First raw frame written to IVSHMEM: %ux%u, %zu bytes%s",
+      this->readyWidth, this->dataHeight, size,
+      this->dataHeight < this->readyHeight ? " (truncated: increase shared memory)" : "");
+    this->loggedWrite = true;
+  }
+  return CAPTURE_RESULT_OK;
 }
 struct CaptureInterface Capture_pipewire = {
   .shortName = "pipewire", .asyncCapture = false,

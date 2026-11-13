@@ -17,6 +17,10 @@ for argument in "$@"; do
     *) arguments+=("$argument") ;;
   esac
 done
+source "$ROOT/scripts/capture-report.sh"
+if ! lgStartReport "$ROOT"; then
+  printf 'Cannot save a capture report; continuing with terminal/journal logging.\n' >&2
+fi
 [[ ${XDG_SESSION_TYPE:-} == wayland ]] || {
   printf 'Run this in a terminal inside the guest KDE/GNOME Wayland session.\n' >&2; exit 1;
 }

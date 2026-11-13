@@ -1,5 +1,34 @@
 # Validation record
 
+## BGRA negotiation and persistent failure reports — 2026-11-13
+
+The user reproduced missing video on a fresh CachyOS/NVIDIA/dummy-plug VM,
+including after selecting the correct monitor and removing QXL. SPICE input
+still works. The previous chooser change did not resolve this. The user cannot
+run the VM while using this chat and cannot currently collect a live failure
+log. The actual failure stage is still unknown; a QXL/SPICE fallback picture
+must not be treated as proof of LG raw-frame capture.
+
+Found a definite bug independently: the SPA enum advertised BGRA as the default
+but omitted it from its allowed alternatives. A local executable using the real
+SPA filter reproduced `-EINVAL` (-22) for a BGRA-only producer. The corrected
+production format helper passed real negotiation tests with BGRA-only, RGBA,
+BGRx and RGBx producers, geometry, maximum-rate constraints, and both CPU buffer
+types. Those pure-header tests were actually executed locally on Windows.
+
+Added explicit first-buffer/copy/IVSHMEM-write diagnostics, detailed rejection
+metadata and a one-time no-usable-frame warning. Backend tests now ingest a
+real mapped MemFd with offsets/padding, verify owned pixels survive producer
+reuse, and exercise publication and rejected-buffer paths. This does not
+exercise a real compositor or NVIDIA GPU.
+
+The launcher now retains a private report for every capture attempt, with a
+bounded read-only diagnostic snapshot and its normal console/journal output.
+Startup tests cover report permissions, separate reports, failure retention
+and XDG state location. Native Arch/Debian and QEMU results are recorded on the
+PR. The real NVIDIA-only failure remains unconfirmed until a saved report and
+guest retry are available. No new DMA-BUF import support is claimed.
+
 ## NVIDIA monitor selection — 2026-11-13
 
 The user confirmed screen, keyboard, mouse and automatic login startup work,

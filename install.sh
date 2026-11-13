@@ -12,6 +12,7 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
   printf 'Run inside the logged-in guest KDE/GNOME Wayland desktop.\n' >&2; exit 1;
 }
 printf 'Installing checkout: %s\nStop any separately launched manual capture first.\n' "$ROOT"
+bash "$ROOT/scripts/ensure-deps.sh"
 bash "$ROOT/setup-startup.sh" stop
 bash "$ROOT/build.sh"
 if [[ ${1:-} != --skip-device-setup ]]; then

@@ -269,7 +269,8 @@ static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
   pw_core_add_listener(this->core, &this->coreListener, &coreEvents, NULL);
   stage = "creating the PipeWire capture stream";
   this->stream = pw_stream_new(this->core, "Looking Glass Linux Guest",
-    pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY,
+    pw_properties_new(PW_KEY_NODE_NAME, "looking-glass-capture",
+      PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY,
       "Capture", PW_KEY_MEDIA_ROLE, "Screen", NULL));
   if (!this->stream)
   {

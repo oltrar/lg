@@ -67,6 +67,7 @@ cat > "$FIXTURE/bin/sudo" <<'EOF'
 exec "$@"
 EOF
 chmod +x "$FIXTURE/bin/sudo"
+printf '#!/bin/sh\nexit 0\n' > "$ROOT/scripts/ensure-deps.sh"
 mkdir -p "$ROOT/overlay" "$ROOT/tools"
 printf 'source version one\n' > "$ROOT/overlay/test.c"
 printf 'frame verifier source\n' > "$ROOT/tools/test.c"

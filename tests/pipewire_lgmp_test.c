@@ -80,7 +80,8 @@ static void global(void * opaque, uint32_t id, uint32_t permissions,
   struct Producer * p = opaque;
   if (strcmp(type, PW_TYPE_INTERFACE_Node) || !props) return;
   const char * name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
-  if (!name || strcmp(name, "Looking Glass Linux Guest")) return;
+  fprintf(stderr, "Test registry node %u: %s\n", id, name ? name : "unnamed");
+  if (!name || strcmp(name, "looking-glass-capture")) return;
   char output[32], input[32];
   snprintf(output, sizeof(output), "%u", p->node);
   snprintf(input, sizeof(input), "%u", id);

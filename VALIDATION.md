@@ -7,10 +7,16 @@ supports the supplied 64 MiB `ivshmem-plain` XML, keeps KVMFR optional, and adds
 microphone configuration/verification while preserving B7 compatibility.
 
 The new transport and test sources were cross-compiled to Linux objects with
-strict warnings. New native tests cover PCI selection/validation and real
-cross-process 64 MiB mappings. A QEMU smoke test boots a Linux guest without
-KVMFR and checks unprivileged PCI BAR2 mapping plus host/guest shared writes.
-Consult the feature PR checks for native test results. KDE/GNOME/NVIDIA capture,
+strict warnings. On implementation commit
+`132c47379774c72282a3a7af937ca23b1d7d2109`, the
+[feature PR workflow](https://github.com/oltrar/lg/actions/runs/43467267371)
+passed all three jobs: Arch build/tests, Debian build/tests, and QEMU IVSHMEM.
+Native tests cover PCI selection/validation and real cross-process 64 MiB
+mappings. The QEMU smoke test booted a Linux guest without KVMFR, dropped the
+mapper to UID 1000, and verified actual 64 MiB PCI BAR2 mapping, a host-written
+marker read by the guest, and guest-written bytes read from the host backing
+file. This validates the production transport path on emulated PCI hardware.
+KDE/GNOME/NVIDIA capture,
 actual sound/input devices, microphone capture in both systems concurrently,
 and guest kernel lockdown configurations still require real-VM verification.
 

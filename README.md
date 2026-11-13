@@ -284,9 +284,10 @@ NVENC or a professional NVIDIA card.
 
 **Status:** experimental source project, not a production-validated replacement
 for the Windows guest software. Native Arch and Debian CI compile and link the
-complete guest application and execute both test suites. The guest kernel
-module and actual KDE/GNOME/NVIDIA/IVSHMEM integration still need validation in
-your VM. Read `VALIDATION.md` for the exact evidence and limits.
+complete guest application and execute all test suites. The
+optional KVMFR module and actual KDE/GNOME/NVIDIA desktop/audio integration
+still need validation in your VM. The default raw PCI path passed a QEMU guest
+test without KVMFR. Read `VALIDATION.md` for the exact evidence and limits.
 
 ## What is implemented
 

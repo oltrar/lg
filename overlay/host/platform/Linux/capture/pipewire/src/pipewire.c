@@ -168,43 +168,70 @@ static const struct pw_stream_events streamEvents = {
 };
 static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
 {
+  const char * stage = "opening the desktop portal";
   this->stop = this->failed = this->hasFormat = this->connected = false;
   this->warnedBuffer = false;
   this->readyWidth = this->readyHeight = 0;
   this->portal = portal_create();
-  if (!this->portal ||
-      !portal_createScreenCastSession(this->portal, &this->sessionHandle) ||
-      !portal_selectSource(this->portal, this->sessionHandle))
+  if (!this->portal)
     goto fail;
+  stage = "ScreenCast.CreateSession";
+  if (!portal_createScreenCastSession(this->portal, &this->sessionHandle))
+    goto fail;
+  stage = "ScreenCast.SelectSources";
+  if (!portal_selectSource(this->portal, this->sessionHandle))
+    goto fail;
+  stage = "ScreenCast.Start / monitor selection";
   uint32_t node = portal_getPipewireNode(this->portal, this->sessionHandle);
   if (!node)
     goto fail;
+  stage = "ScreenCast.OpenPipeWireRemote";
   int fd = portal_openPipewireRemote(this->portal, this->sessionHandle);
   if (fd < 0)
     goto fail;
+  stage = "creating the PipeWire thread loop";
   this->loop = pw_thread_loop_new("looking-glass-capture", NULL);
   if (!this->loop)
   {
+    DEBUG_ERROR("pw_thread_loop_new: %s", strerror(errno));
     close(fd);
     goto fail;
   }
+  stage = "creating the PipeWire context";
   this->context = pw_context_new(pw_thread_loop_get_loop(this->loop), NULL, 0);
-  if (!this->context || pw_thread_loop_start(this->loop) < 0)
+  if (!this->context)
   {
+    DEBUG_ERROR("pw_context_new: %s", strerror(errno));
+    close(fd);
+    goto fail;
+  }
+  stage = "starting the PipeWire thread loop";
+  int status = pw_thread_loop_start(this->loop);
+  if (status < 0)
+  {
+    DEBUG_ERROR("pw_thread_loop_start: %s", strerror(-status));
     close(fd);
     goto fail;
   }
   this->started = true;
   pw_thread_loop_lock(this->loop);
+  stage = "connecting to the portal PipeWire remote";
   this->core = pw_context_connect_fd(this->context, fd, NULL, 0);
   if (!this->core)
+  {
+    DEBUG_ERROR("pw_context_connect_fd: %s", strerror(errno));
     goto failLocked;
+  }
   pw_core_add_listener(this->core, &this->coreListener, &coreEvents, NULL);
+  stage = "creating the PipeWire capture stream";
   this->stream = pw_stream_new(this->core, "Looking Glass Linux Guest",
     pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY,
       "Capture", PW_KEY_MEDIA_ROLE, "Screen", NULL));
   if (!this->stream)
+  {
+    DEBUG_ERROR("pw_stream_new: %s", strerror(errno));
     goto failLocked;
+  }
   pw_stream_add_listener(this->stream, &this->streamListener, &streamEvents, NULL);
   uint8_t storage[1024];
   struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage, sizeof(storage));
@@ -220,9 +247,15 @@ static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
       &SPA_RECTANGLE(1920, 1080), &SPA_RECTANGLE(1, 1), &SPA_RECTANGLE(8192, 8192)),
     SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(
       &SPA_FRACTION(fps, 1), &SPA_FRACTION(0, 1), &SPA_FRACTION(fps, 1)));
-  if (pw_stream_connect(this->stream, PW_DIRECTION_INPUT, node,
-        PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, &format, 1) < 0)
+  stage = "connecting the PipeWire capture stream";
+  status = pw_stream_connect(this->stream, PW_DIRECTION_INPUT, node,
+        PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, &format, 1);
+  if (status < 0)
+  {
+    DEBUG_ERROR("pw_stream_connect: %s", strerror(-status));
     goto failLocked;
+  }
+  stage = "negotiating the raw video format";
   struct timespec deadline;
   pw_thread_loop_get_time(this->loop, &deadline, 15 * SPA_NSEC_PER_SEC);
   while (!this->hasFormat && !this->failed)
@@ -238,6 +271,7 @@ static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
 failLocked:
   pw_thread_loop_unlock(this->loop);
 fail:
+  DEBUG_ERROR("PipeWire capture initialization failed during %s", stage);
   pipewire_deinit();
   return false;
 }

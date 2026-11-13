@@ -365,7 +365,7 @@ new file mode 100644
 diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform/Linux/capture/pipewire/src/pipewire.c
 --- a/host/platform/Linux/capture/pipewire/src/pipewire.c
 +++ b/host/platform/Linux/capture/pipewire/src/pipewire.c
-@@ -1,493 +1,381 @@
+@@ -1,493 +1,415 @@
  /**
   * Looking Glass
 - * Copyright © 2017-2025 The Looking Glass Authors
@@ -610,43 +610,70 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +};
 +static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
 +{
++  const char * stage = "opening the desktop portal";
 +  this->stop = this->failed = this->hasFormat = this->connected = false;
 +  this->warnedBuffer = false;
 +  this->readyWidth = this->readyHeight = 0;
 +  this->portal = portal_create();
-+  if (!this->portal ||
-+      !portal_createScreenCastSession(this->portal, &this->sessionHandle) ||
-+      !portal_selectSource(this->portal, this->sessionHandle))
++  if (!this->portal)
 +    goto fail;
++  stage = "ScreenCast.CreateSession";
++  if (!portal_createScreenCastSession(this->portal, &this->sessionHandle))
++    goto fail;
++  stage = "ScreenCast.SelectSources";
++  if (!portal_selectSource(this->portal, this->sessionHandle))
++    goto fail;
++  stage = "ScreenCast.Start / monitor selection";
 +  uint32_t node = portal_getPipewireNode(this->portal, this->sessionHandle);
 +  if (!node)
 +    goto fail;
++  stage = "ScreenCast.OpenPipeWireRemote";
 +  int fd = portal_openPipewireRemote(this->portal, this->sessionHandle);
 +  if (fd < 0)
 +    goto fail;
++  stage = "creating the PipeWire thread loop";
 +  this->loop = pw_thread_loop_new("looking-glass-capture", NULL);
 +  if (!this->loop)
 +  {
++    DEBUG_ERROR("pw_thread_loop_new: %s", strerror(errno));
 +    close(fd);
 +    goto fail;
 +  }
++  stage = "creating the PipeWire context";
 +  this->context = pw_context_new(pw_thread_loop_get_loop(this->loop), NULL, 0);
-+  if (!this->context || pw_thread_loop_start(this->loop) < 0)
++  if (!this->context)
 +  {
++    DEBUG_ERROR("pw_context_new: %s", strerror(errno));
++    close(fd);
++    goto fail;
++  }
++  stage = "starting the PipeWire thread loop";
++  int status = pw_thread_loop_start(this->loop);
++  if (status < 0)
++  {
++    DEBUG_ERROR("pw_thread_loop_start: %s", strerror(-status));
 +    close(fd);
 +    goto fail;
 +  }
 +  this->started = true;
 +  pw_thread_loop_lock(this->loop);
++  stage = "connecting to the portal PipeWire remote";
 +  this->core = pw_context_connect_fd(this->context, fd, NULL, 0);
 +  if (!this->core)
++  {
++    DEBUG_ERROR("pw_context_connect_fd: %s", strerror(errno));
 +    goto failLocked;
++  }
 +  pw_core_add_listener(this->core, &this->coreListener, &coreEvents, NULL);
++  stage = "creating the PipeWire capture stream";
 +  this->stream = pw_stream_new(this->core, "Looking Glass Linux Guest",
 +    pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY,
 +      "Capture", PW_KEY_MEDIA_ROLE, "Screen", NULL));
 +  if (!this->stream)
++  {
++    DEBUG_ERROR("pw_stream_new: %s", strerror(errno));
 +    goto failLocked;
++  }
 +  pw_stream_add_listener(this->stream, &this->streamListener, &streamEvents, NULL);
 +  uint8_t storage[1024];
 +  struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage, sizeof(storage));
@@ -910,9 +937,15 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -  pw_thread_loop_accept(this->threadLoop);
 -
 +      &SPA_FRACTION(fps, 1), &SPA_FRACTION(0, 1), &SPA_FRACTION(fps, 1)));
-+  if (pw_stream_connect(this->stream, PW_DIRECTION_INPUT, node,
-+        PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, &format, 1) < 0)
++  stage = "connecting the PipeWire capture stream";
++  status = pw_stream_connect(this->stream, PW_DIRECTION_INPUT, node,
++        PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, &format, 1);
++  if (status < 0)
++  {
++    DEBUG_ERROR("pw_stream_connect: %s", strerror(-status));
 +    goto failLocked;
++  }
++  stage = "negotiating the raw video format";
 +  struct timespec deadline;
 +  pw_thread_loop_get_time(this->loop, &deadline, 15 * SPA_NSEC_PER_SEC);
 +  while (!this->hasFormat && !this->failed)
@@ -928,6 +961,7 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +failLocked:
 +  pw_thread_loop_unlock(this->loop);
  fail:
++  DEBUG_ERROR("PipeWire capture initialization failed during %s", stage);
    pipewire_deinit();
    return false;
  }
@@ -1190,7 +1224,7 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 diff --git a/host/platform/Linux/capture/pipewire/src/portal.c b/host/platform/Linux/capture/pipewire/src/portal.c
 --- a/host/platform/Linux/capture/pipewire/src/portal.c
 +++ b/host/platform/Linux/capture/pipewire/src/portal.c
-@@ -1,428 +1,240 @@
+@@ -1,428 +1,255 @@
  /**
   * Looking Glass
 - * Copyright © 2017-2025 The Looking Glass Authors
@@ -1405,6 +1439,17 @@ diff --git a/host/platform/Linux/capture/pipewire/src/portal.c b/host/platform/L
 -
 -  alloc_sprintf(token, "lg%" PRIu64, counter);
 -  if (!*token)
+-    return false;
+-
+-  alloc_sprintf(path, "/org/freedesktop/portal/desktop/request/%s/lg%" PRIu64,
+-    portal->senderName, counter);
+-  if (!path)
+-  {
+-    free(*token);
+-    *token = NULL;
+-    return false;
+-  }
+-
 +    G_DBUS_SIGNAL_FLAGS_NONE, responseCallback, &state, NULL);
 +  guint timeout = 0;
 +  g_variant_builder_add(options, "{sv}", "handle_token", g_variant_new_string(token));
@@ -1452,39 +1497,23 @@ diff --git a/host/platform/Linux/capture/pipewire/src/portal.c b/host/platform/L
 +  GVariantBuilder options;
 +  g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
 +  g_autoptr(GVariant) result = request(p, "CreateSession", NULL, &options);
-+  return result && g_variant_lookup(result, "session_handle", "o", handle);
-+}
-+void portal_destroySession(struct Portal * p, char ** handle)
-+{
-+  if (!handle || !*handle) return;
-+  g_dbus_connection_call_sync(p->conn, PORTAL_NAME, *handle,
-+    "org.freedesktop.portal.Session", "Close", NULL, NULL,
-+    G_DBUS_CALL_FLAGS_NONE, 5000, NULL, NULL);
-+  g_clear_pointer(handle, g_free);
-+}
-+bool portal_selectSource(struct Portal * p, const char * session)
-+{
-+  g_autoptr(GVariant) version = g_dbus_proxy_get_cached_property(p->screenCast,
-+    "version");
-+  g_autofree char * token = NULL;
-+  g_autoptr(GVariant) modes = g_dbus_proxy_get_cached_property(p->screenCast,
-+    "AvailableCursorModes");
-+  if (!modes || !(g_variant_get_uint32(modes) & 2))
++  if (!result)
++    return false;
++  /* The portal spec intentionally returns this object path as a STRING ('s'),
++   * not an object-path variant ('o'), for historical compatibility. */
++  if (!g_variant_lookup(result, "session_handle", "s", handle))
 +  {
-+    DEBUG_ERROR("The portal must support an embedded cursor (KDE/GNOME)");
-     return false;
--
--  alloc_sprintf(path, "/org/freedesktop/portal/desktop/request/%s/lg%" PRIu64,
--    portal->senderName, counter);
--  if (!path)
--  {
--    free(*token);
--    *token = NULL;
--    return false;
--  }
--
--  return true;
--}
++    DEBUG_ERROR("Portal CreateSession response lacks string session_handle");
++    return false;
++  }
++  if (!g_variant_is_object_path(*handle))
++  {
++    DEBUG_ERROR("Portal CreateSession returned an invalid session object path");
++    g_clear_pointer(handle, g_free);
++    return false;
++  }
+   return true;
+ }
 -
 -static bool getSessionToken(char ** token)
 -{
@@ -1748,6 +1777,25 @@ diff --git a/host/platform/Linux/capture/pipewire/src/portal.c b/host/platform/L
 -  if (err)
 -  {
 -    DEBUG_ERROR("Failed to call OpenPipeWireRemote on session: %s", err->message);
++void portal_destroySession(struct Portal * p, char ** handle)
++{
++  if (!handle || !*handle) return;
++  g_dbus_connection_call_sync(p->conn, PORTAL_NAME, *handle,
++    "org.freedesktop.portal.Session", "Close", NULL, NULL,
++    G_DBUS_CALL_FLAGS_NONE, 5000, NULL, NULL);
++  g_clear_pointer(handle, g_free);
++}
++bool portal_selectSource(struct Portal * p, const char * session)
++{
++  g_autoptr(GVariant) version = g_dbus_proxy_get_cached_property(p->screenCast,
++    "version");
++  g_autofree char * token = NULL;
++  g_autoptr(GVariant) modes = g_dbus_proxy_get_cached_property(p->screenCast,
++    "AvailableCursorModes");
++  if (!modes || !(g_variant_get_uint32(modes) & 2))
++  {
++    DEBUG_ERROR("The portal must support an embedded cursor (KDE/GNOME)");
++    return false;
 +  }
 +  GVariantBuilder options;
 +  g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);

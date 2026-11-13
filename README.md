@@ -19,7 +19,7 @@ microphone capture use B7's existing SPICE channels; SPICE video is disabled.
 Inside an up-to-date CachyOS/Arch **KDE Wayland guest**:
 
 ```bash
-sudo pacman -S --needed base-devel git cmake ninja pkgconf pipewire glib2 \
+sudo pacman -S --needed base-devel git cmake ninja pkgconf pipewire glib2 dbus \
   xdg-desktop-portal xdg-desktop-portal-kde pciutils
 ```
 
@@ -54,6 +54,14 @@ builds only the Linux guest host with PipeWire capture. It does not replace
 your client, install system files or change the VM configuration.
 
 Binary: `_build/host/looking-glass-host`.
+
+After updating this repository, run `bash build.sh` again before running
+`bash run-guest.sh`. The build now records the source overlay it applied and
+can replace an exact older managed overlay. For older builds without that
+record, it recognizes exact overlay versions in this repository's Git history.
+Unrecognized local source edits are preserved and stop the update. If you
+upgrade from downloaded archives without Git history and see that message,
+extract/build the new project in a separate directory instead of deleting edits.
 
 ## 3. VM XML: plain IVSHMEM, input, sound and microphone
 
@@ -254,6 +262,26 @@ shared-memory mappings and backend publication. CI additionally boots a minimal
 QEMU guest and checks **unprivileged 64 MiB PCI BAR2 mapping and guest-to-host
 writes with no KVMFR driver**. This does not replace real NVIDIA/Wayland/audio
 testing in your VM. See [VALIDATION.md](VALIDATION.md).
+
+## Troubleshooting capture startup
+
+If the guest log shows `PCI IVSHMEM BAR2` and `IVSHMEM Size: 64 MiB`, the
+shared-memory mapping succeeded. A subsequent `Failed to initialize the capture
+device` message points to screen capture rather than a missing KVMFR module.
+`KVMFR Version: 20` names B7's frame protocol version; it is not a module check.
+The missing `~/looking-glass-host.ini` message is also normal when using the
+supplied launcher, which supplies its options on the command line.
+
+Earlier versions of this project rejected the standard ScreenCast
+`CreateSession` response because `session_handle` is a D-Bus **string** (`s`)
+even though its contents are an object path. This is now parsed and validated
+correctly, with a real private-D-Bus regression test. Rebuild after updating.
+
+Capture startup errors now name the failed stage (portal session creation,
+source selection, monitor chooser, PipeWire remote, context/stream creation,
+or raw video negotiation). If capture still fails, run `bash doctor.sh` in the
+same guest desktop session and keep the full new capture output, including
+the stage-specific error. Run the application without `sudo`.
 
 ## How it works
 

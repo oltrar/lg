@@ -5,21 +5,21 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:
-      - run: pacman -Syu --noconfirm git cmake ninja pkgconf pipewire glib2
+      - run: pacman -Syu --noconfirm git cmake ninja pkgconf pipewire glib2 dbus
       - uses: actions/checkout@v4
       - run: bash build.sh
   debian:
     runs-on: ubuntu-latest
     container: debian:bookworm
     steps:
-      - run: apt-get update && apt-get install -y git ca-certificates build-essential cmake ninja-build pkg-config libpipewire-0.3-dev libglib2.0-dev
+      - run: apt-get update && apt-get install -y git ca-certificates build-essential cmake ninja-build pkg-config libpipewire-0.3-dev libglib2.0-dev dbus-daemon
       - uses: actions/checkout@v4
       - run: bash build.sh
   ivshmem-qemu:
     runs-on: ubuntu-latest
     container: debian:bookworm
     steps:
-      - run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates build-essential cmake ninja-build pkg-config libpipewire-0.3-dev libglib2.0-dev qemu-system-x86 busybox-static cpio gzip linux-image-amd64
+      - run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates build-essential cmake ninja-build pkg-config libpipewire-0.3-dev libglib2.0-dev dbus-daemon qemu-system-x86 busybox-static cpio gzip linux-image-amd64
       - uses: actions/checkout@v4
       - run: bash build.sh
       - run: bash tests/qemu-ivshmem.sh

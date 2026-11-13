@@ -1,5 +1,29 @@
 # Validation record
 
+## Service options path, repair and build identity — 2026-11-13
+
+The user's actual journal showed `EnvironmentFile= path is not absolute,
+ignoring:` because the generated directive surrounded its absolute filename
+with literal quotes. This bug was introduced in the startup service generator
+and persisted across later source updates. It is not a GPU driver issue.
+The warning confirms ignored settings, but the supplied output does not show
+whether capture subsequently started or why video failed.
+
+The corrected directive uses an unquoted absolute pattern with escaped systemd
+specifiers/glob characters. Tests reproduce the quoted-path warning with real
+systemd parsing, verify the corrected unit has no diagnostics, and use real
+glob/file opening to check special-character paths resolve to exactly the
+saved settings. The installer now validates staged units and treats warnings
+as failures even if `systemd-analyze verify` exits zero. A regression test
+checks warning refusal preserves the previously installed unit.
+
+Added service `repair` and startup `uninstall` commands, an explicit
+stop/build/register/start installer, a successful-build record, and `version.sh`.
+Tests cover repair of an old unit, saved-options preservation, installer flow,
+and source/binary mismatch reporting. Test service operations are still mocked;
+the real systemd parser and glob implementation are exercised. Native results
+are recorded on the PR. Actual NVIDIA-only capture remains unverified here.
+
 ## BGRA negotiation and persistent failure reports — 2026-11-13
 
 The user reproduced missing video on a fresh CachyOS/NVIDIA/dummy-plug VM,

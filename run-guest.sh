@@ -34,6 +34,13 @@ fi
   printf 'LG_CAPTURE_RESTORE must be yes or no. Use --choose-display to reselect once.\n' >&2; exit 1;
 }
 [[ -x "$BINARY" ]] || { printf 'Build first: bash build.sh\n' >&2; exit 1; }
+if [[ -f $ROOT/_build/build-info.txt && -z ${LG_BINARY:-} ]]; then
+  source "$ROOT/scripts/build-info.sh"
+  if [[ $(lgBuildValue "$ROOT" source_sha256) != "$(lgSourceFingerprint "$ROOT")" ||
+        $(lgBuildValue "$ROOT" binary_sha256) != "$(sha256sum < "$BINARY" | cut -d ' ' -f 1)" ]]; then
+    printf 'WARNING: executable/build record differs from this checkout. Rebuild with bash install.sh; inspect bash version.sh.\n' >&2
+  fi
+fi
 # The application discovers/validates PCI BAR2 for ivshmem[:BDF]. An explicit
 # /dev/kvmfrN or file remains supported; no KVMFR device is required by default.
 if [[ $DEVICE != ivshmem && $DEVICE != ivshmem:* ]]; then

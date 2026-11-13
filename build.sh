@@ -27,5 +27,7 @@ cmake -S "$SRC/host" -B "$ROOT/_build/host" -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -DUSE_XCB=OFF -DUSE_PIPEWIRE=ON -DENABLE_BACKTRACE=OFF
 cmake --build "$ROOT/_build/host" --parallel
+source "$ROOT/scripts/build-info.sh"
+lgRecordBuild "$ROOT" "$ROOT/_build/host/looking-glass-host" "$LG_COMMIT"
 printf '\nBuilt: %s\nRun from your guest Wayland desktop with: bash run-guest.sh\n' \
   "$ROOT/_build/host/looking-glass-host"

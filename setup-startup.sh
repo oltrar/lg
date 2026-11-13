@@ -7,9 +7,9 @@ MARKER='# Managed by oltrar/lg setup-startup.sh (v1)'
 CONFIG=${XDG_CONFIG_HOME:-"$HOME/.config"}
 ACTION=${1:-}
 usage() {
-  printf 'Usage: bash setup-startup.sh {enable|disable|start|restart|stop|status|choose-display}\nRun as your guest desktop user, without sudo.\n'
+  printf 'Usage: bash setup-startup.sh {enable|repair|disable|uninstall|start|restart|stop|status|choose-display}\nRun as your guest desktop user, without sudo.\n'
 }
-[[ $# == 1 && $ACTION =~ ^(enable|disable|start|restart|stop|status|choose-display)$ ]] || { usage; exit 1; }
+[[ $# == 1 && $ACTION =~ ^(enable|repair|disable|uninstall|start|restart|stop|status|choose-display)$ ]] || { usage; exit 1; }
 (( EUID != 0 )) || { printf 'Run without sudo, as the guest desktop user.\n' >&2; exit 1; }
 [[ $CONFIG == /* && $ROOT != *$'\n'* && $ROOT != *$'\r'* &&
    $CONFIG != *$'\n'* && $CONFIG != *$'\r'* ]] || {
@@ -19,6 +19,14 @@ command -v systemctl >/dev/null || { printf 'A systemd user session is required.
 SERVICE="$CONFIG/systemd/user/$UNIT"
 DESKTOP="$CONFIG/autostart/looking-glass-host.desktop"
 OPTIONS="$CONFIG/looking-glass-linux-wayland/autostart.env"
+STAGING=''
+cleanup() {
+  if [[ -n $STAGING ]]; then
+    rm -f -- "$STAGING/$UNIT"
+    rmdir -- "$STAGING" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
 managed() { [[ -f $1 && ! -L $1 ]] && grep -Fxq -- "$MARKER" "$1"; }
 preflight() {
   local file
@@ -43,6 +51,14 @@ unit_quote() {
   printf '"%s"' "$value"
 }
 exec_quote() { local value=${1//\$/\$\$}; unit_quote "$value"; }
+env_file_pattern() {
+  # EnvironmentFile is a raw glob pattern. Neither shell quoting nor C-style
+  # word quoting applies; escape glob characters and systemd specifiers only.
+  local value=$1
+  value=${value//\\/\\\\}; value=${value//\*/\\*}; value=${value//\?/\\?}
+  value=${value//\[/\\[}; value=${value//\]/\\]}; value=${value//%/%%}
+  printf '%s' "$value"
+}
 desktop_quote() {
   local value=$1
   value=${value//\\/\\\\}; value=${value//\"/\\\"}
@@ -59,12 +75,13 @@ write_file() {
   mv -f -- "$temporary" "$destination"
 }
 case $ACTION in
-  enable)
+  enable|repair)
     require_session
     [[ -x "$ROOT/_build/host/looking-glass-host" ]] || {
       printf 'Build and test capture first: bash build.sh; bash run-guest.sh\n' >&2; exit 1;
     }
     preflight
+    command -v systemd-analyze >/dev/null || { printf 'Missing systemd-analyze.\n' >&2; exit 1; }
     [[ ! -L $OPTIONS && ( ! -e $OPTIONS || -f $OPTIONS ) ]] || {
       printf 'Preserving unexpected options path: %s\n' "$OPTIONS" >&2; exit 1;
     }
@@ -80,7 +97,8 @@ LG_FPS=60
 LG_CAPTURE_RESTORE=yes
 EOF
     fi
-    write_file "$SERVICE" <<EOF
+    STAGING=$(mktemp -d "$(dirname -- "$SERVICE")/.lg-unit.XXXXXX")
+    write_file "$STAGING/$UNIT" <<EOF
 $MARKER
 [Unit]
 Description=Looking Glass Linux guest capture
@@ -89,11 +107,22 @@ After=graphical-session.target
 
 [Service]
 Type=exec
-EnvironmentFile=$(unit_quote "$OPTIONS")
+# EnvironmentFile takes a single raw path, not an ExecStart-style quoted word.
+EnvironmentFile=$(env_file_pattern "$OPTIONS")
 ExecStart=/usr/bin/bash $(exec_quote "$ROOT/run-guest.sh")
 Restart=no
 TimeoutStopSec=10
 EOF
+    # verify can return success after ignoring malformed directives. Its
+    # diagnostics must be empty too, before replacing the installed unit.
+    if ! verification=$(systemd-analyze --user verify "$STAGING/$UNIT" 2>&1); then
+      printf 'Startup unit validation failed:\n%s\n' "$verification" >&2; exit 1
+    fi
+    if [[ -n $verification ]]; then
+      printf 'Startup unit validation reported warnings; preserving installed unit:\n%s\n' "$verification" >&2
+      exit 1
+    fi
+    mv -f -- "$STAGING/$UNIT" "$SERVICE"
     write_file "$DESKTOP" <<EOF
 $MARKER
 [Desktop Entry]
@@ -107,7 +136,7 @@ EOF
     systemctl --user daemon-reload
     printf 'Enabled for the next KDE/GNOME Wayland login. Current capture is unchanged.\nSettings: %s\nStop any manual capture before using: bash setup-startup.sh start\n' "$OPTIONS"
     ;;
-  disable)
+  disable|uninstall)
     preflight
     if managed "$SERVICE"; then
       systemctl --user stop "$UNIT"
@@ -134,8 +163,13 @@ EOF
     exec bash "$ROOT/run-guest.sh" --choose-display
     ;;
   stop)
-    managed "$SERVICE" || { printf 'No managed startup service is installed.\n' >&2; exit 1; }
-    systemctl --user stop "$UNIT"
+    if managed "$SERVICE"; then
+      systemctl --user stop "$UNIT"
+    elif [[ ! -e $SERVICE && ! -L $SERVICE ]]; then
+      printf 'No managed startup service is installed.\n'
+    else
+      printf 'Preserving an unmanaged service: %s\n' "$SERVICE" >&2; exit 1
+    fi
     ;;
   status)
     if managed "$DESKTOP"; then printf 'Desktop startup: enabled\n'; else printf 'Desktop startup: disabled\n'; fi

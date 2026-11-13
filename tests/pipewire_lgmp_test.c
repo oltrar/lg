@@ -162,7 +162,15 @@ int main(int argc, char ** argv)
     char * check[] = {argv[2], argv[3], "15", rawPath, NULL};
     int status;
     assert(g_spawn_sync(NULL, check, NULL, 0, NULL, NULL, NULL, NULL, &status, NULL));
-    assert(g_spawn_check_wait_status(status, NULL));
+    if (!g_spawn_check_wait_status(status, NULL))
+    {
+      int hostStatus;
+      if (waitpid(host, &hostStatus, WNOHANG) == host)
+        fprintf(stderr, "Guest host exited: signal=%d exit=%d\n",
+          WIFSIGNALED(hostStatus) ? WTERMSIG(hostStatus) : 0,
+          WIFEXITED(hostStatus) ? WEXITSTATUS(hostStatus) : -1);
+      assert(!"frame verification failed");
+    }
     g_autofree char * raw = NULL;
     gsize length;
     assert(g_file_get_contents(rawPath, &raw, &length, NULL) && length == WIDTH * HEIGHT * 4);

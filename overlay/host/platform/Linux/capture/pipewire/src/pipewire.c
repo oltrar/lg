@@ -410,9 +410,13 @@ static CaptureResult copyBuffer(struct spa_buffer * buffer)
     return rejectBuffer("unmapped, unsupported or out-of-bounds layout", data);
   if (layout.packedSize > this->capacity)
   {
-    uint8_t * memory = realloc(this->snapshot, layout.packedSize);
-    if (!memory)
+    /* B7 framebuffer_write uses aligned SSE/AVX2 streaming loads. malloc /
+     * realloc promise only 16-byte alignment on x86-64; large allocations
+     * commonly land at page+16 and fault on the first 32-byte AVX2 load. */
+    void * memory = NULL;
+    if (posix_memalign(&memory, 32, layout.packedSize) != 0)
       return CAPTURE_RESULT_ERROR;
+    free(this->snapshot);
     this->snapshot = memory;
     this->capacity = layout.packedSize;
   }

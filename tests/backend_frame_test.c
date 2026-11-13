@@ -74,6 +74,7 @@ int main(void)
     .formatVer = 8, .format = CAPTURE_FMT_BGRA};
   this = &mappedState;
   assert(copyBuffer(&source) == CAPTURE_RESULT_OK);
+  assert((uintptr_t)mappedState.snapshot % 32 == 0);
   assert(mappedState.loggedCopy && memcmp(mappedState.snapshot, expected, 48) == 0);
   memset(mapped, 0xff, 64); /* Producer can reuse its buffer after the copy. */
   assert(memcmp(mappedState.snapshot, expected, 48) == 0);

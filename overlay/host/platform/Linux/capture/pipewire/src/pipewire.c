@@ -46,6 +46,7 @@ struct pipewire
 };
 static struct pipewire * this;
 static bool pipewire_deinit(void);
+static bool pipewire_shutdown(void);
 
 static bool fpsValidator(struct Option * opt, const char ** error)
 {
@@ -101,6 +102,11 @@ static void streamProcess(void * opaque)
   struct pw_buffer * buffer;
   while ((buffer = pw_stream_dequeue_buffer(this->stream)))
   {
+    if (this->stop)
+    {
+      pw_stream_queue_buffer(this->stream, buffer);
+      continue;
+    }
     ++this->receivedBuffers;
     if (!this->loggedBuffer && buffer->buffer && buffer->buffer->n_datas && buffer->buffer->datas)
     {
@@ -186,6 +192,23 @@ static const struct pw_stream_events streamEvents = {
 };
 static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
 {
+  /* B7 deinitializes capture whenever its last LGMP client disconnects, even
+   * immediately after initial setup. Keep the consent/session and chosen
+   * monitor alive across that idle transition; resume the SAME stream. */
+  if (this->stream)
+  {
+    pw_thread_loop_lock(this->loop);
+    this->stop = false;
+    int status = this->failed ? -EPIPE : pw_stream_set_active(this->stream, true);
+    pw_thread_loop_unlock(this->loop);
+    if (status < 0)
+    {
+      DEBUG_ERROR("Cannot resume the selected monitor: %s", strerror(-status));
+      return false;
+    }
+    DEBUG_INFO("Resuming the existing monitor session (no new chooser)");
+    return true;
+  }
   const char * stage = "opening the desktop portal";
   this->stop = this->failed = this->hasFormat = this->connected = false;
   this->warnedBuffer = false;
@@ -284,7 +307,7 @@ failLocked:
 fail:
   DEBUG_ERROR("PipeWire capture initialization failed during %s", stage);
   DEBUG_INFO("For a removed/wrong monitor, run bash run-guest.sh --choose-display from an accessible guest desktop");
-  pipewire_deinit();
+  pipewire_shutdown();
   return false;
 }
 static void pipewire_stop(void)
@@ -293,11 +316,18 @@ static void pipewire_stop(void)
     return;
   pw_thread_loop_lock(this->loop);
   this->stop = true;
+  if (this->stream && pw_stream_set_active(this->stream, false) < 0)
+    this->failed = true;
   discardPending();
   pw_thread_loop_signal(this->loop, false);
   pw_thread_loop_unlock(this->loop);
 }
 static bool pipewire_deinit(void)
+{
+  pipewire_stop();
+  return true;
+}
+static bool pipewire_shutdown(void)
 {
   pipewire_stop();
   /* Stop outside the lock; no callbacks can run after stop returns. */
@@ -323,7 +353,7 @@ static bool pipewire_deinit(void)
 }
 static void pipewire_free(void)
 {
-  pipewire_deinit();
+  pipewire_shutdown();
   free(this->snapshot);
   free(this);
   this = NULL;

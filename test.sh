@@ -6,6 +6,7 @@ mkdir -p "$ROOT/_build/tests"
   "$ROOT/tests/frame_layout_test.c" -o "$ROOT/_build/tests/frame_layout_test"
 "$ROOT/_build/tests/frame_layout_test"
 bash "$ROOT/tests/overlay_upgrade_test.sh"
+bash "$ROOT/tests/ivshmem_permissions_test.sh"
 "${CC:-cc}" -std=gnu11 -D_GNU_SOURCE -Wall -Werror -O1 -g \
   "$ROOT/tests/ivshmem_pci_test.c" \
   "$ROOT/overlay/common/src/platform/linux/ivshmem_pci.c" \

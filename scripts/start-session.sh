@@ -24,6 +24,10 @@ done
 # Clear optional values from a previous desktop login, rather than reusing them.
 if ((${#absent[@]})); then systemctl --user unset-environment "${absent[@]}"; fi
 systemctl --user import-environment "${present[@]}"
-systemctl --user reset-failed looking-glass-host.service
+# reset-failed fails for a unit that has never been loaded. Start itself loads
+# the unit; resetting is needed only after a real failure/start-limit hit.
+if [[ $(systemctl --user show -p ActiveState --value looking-glass-host.service) == failed ]]; then
+  systemctl --user reset-failed looking-glass-host.service
+fi
 # Do not block desktop startup while a portal chooser is waiting for the user.
 exec systemctl --user --no-block "$ACTION" looking-glass-host.service

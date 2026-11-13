@@ -27,6 +27,14 @@ cmake -S "$SRC/host" -B "$ROOT/_build/host" -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -DUSE_XCB=OFF -DUSE_PIPEWIRE=ON -DENABLE_BACKTRACE=OFF
 cmake --build "$ROOT/_build/host" --parallel
+"${CC:-cc}" -std=gnu11 -D_GNU_SOURCE -Wall -Werror -O2 \
+  -ffunction-sections -fdata-sections -Wl,--gc-sections \
+  -I "$SRC/common/include" -I "$SRC" -I "$SRC/repos/LGMP/lgmp/include" \
+  "$ROOT/tools/frame-check.c" \
+  "$ROOT/overlay/common/src/platform/linux/ivshmem.c" \
+  "$ROOT/overlay/common/src/platform/linux/ivshmem_pci.c" \
+  "$SRC/repos/LGMP/lgmp/src/client.c" "$SRC/repos/LGMP/lgmp/src/status.c" \
+  -o "$ROOT/_build/lg-frame-check"
 source "$ROOT/scripts/build-info.sh"
 lgRecordBuild "$ROOT" "$ROOT/_build/host/looking-glass-host" "$LG_COMMIT"
 printf '\nBuilt: %s\nRun from your guest Wayland desktop with: bash run-guest.sh\n' \

@@ -5,6 +5,7 @@ set -euo pipefail
 ADDRESS=''
 TARGET_USER=${SUDO_USER:-}
 PERSIST=0
+AUTO=0
 while (($#)); do
   case "$1" in
     --device) ADDRESS=${2:?Missing PCI address}; shift 2 ;;
@@ -25,6 +26,7 @@ GID_NUMBER=$(id -g "$TARGET_USER")
 ((UID_NUMBER > 0)) || { printf 'The desktop account must not have UID 0.\n' >&2; exit 1; }
 ROOT=/sys/bus/pci/devices
 if [[ -z $ADDRESS ]]; then
+  AUTO=1
   devices=()
   for path in "$ROOT"/*; do
     [[ -f $path/vendor && -f $path/device ]] || continue
@@ -61,11 +63,17 @@ if ((PERSIST)); then
   DEST=/usr/local/libexec/lg-ivshmem-permissions
   RULE=/etc/udev/rules.d/70-lg-ivshmem.rules
   # Install a root-owned helper, rather than running a user-writable project
-  # script as root from udev. The rule matches only this selected PCI address.
+  # script as root from udev. Auto mode re-discovers the unique IVSHMEM device
+  # after topology changes (e.g. removing QXL). Explicit --device stays pinned.
   install -Dm755 -- "${BASH_SOURCE[0]}" "$DEST"
-  printf 'ACTION=="add", SUBSYSTEM=="pci", KERNEL=="%s", ATTR{vendor}=="0x1af4", ATTR{device}=="0x1110", RUN+="%s --device %%k --user %s"\n' \
-    "$ADDRESS" "$DEST" "$TARGET_USER" > "$RULE"
+  if ((AUTO)); then
+    printf 'ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1af4", ATTR{device}=="0x1110", RUN+="%s --user %s"\n' \
+      "$DEST" "$TARGET_USER" > "$RULE"
+  else
+    printf 'ACTION=="add", SUBSYSTEM=="pci", KERNEL=="%s", ATTR{vendor}=="0x1af4", ATTR{device}=="0x1110", RUN+="%s --device %%k --user %s"\n' \
+      "$ADDRESS" "$DEST" "$TARGET_USER" > "$RULE"
+  fi
   chmod 0644 "$RULE"
   udevadm control --reload-rules
-  printf 'Installed persistent permissions for this guest PCI address. Re-run setup if its address changes.\n'
+  printf 'Installed persistent permissions (automatic unique-device discovery: %s).\n' "$AUTO"
 fi

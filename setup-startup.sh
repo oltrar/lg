@@ -43,6 +43,16 @@ require_session() {
   }
   systemctl --user show-environment >/dev/null
 }
+stop_managed() {
+  # A file can exist while the manager has forgotten/not yet loaded the unit.
+  # Reload before stopping and tolerate only the genuine not-found case.
+  systemctl --user daemon-reload
+  local state
+  if ! state=$(systemctl --user show -p LoadState --value "$UNIT"); then
+    [[ $state == not-found ]] || return 1
+  fi
+  if [[ $state != not-found ]]; then systemctl --user stop "$UNIT"; fi
+}
 # systemd quotes differ from shell and .desktop quotes. No generated command
 # uses a shell's eval/-c. Escape specifiers and ExecStart dollar expansion too.
 unit_quote() {
@@ -110,6 +120,8 @@ Type=exec
 # EnvironmentFile takes a single raw path, not an ExecStart-style quoted word.
 EnvironmentFile=$(env_file_pattern "$OPTIONS")
 ExecStart=/usr/bin/bash $(exec_quote "$ROOT/run-guest.sh")
+ExecStartPost=/usr/bin/bash $(exec_quote "$ROOT/check-video.sh")
+TimeoutStartSec=180
 Restart=no
 TimeoutStopSec=10
 EOF
@@ -139,7 +151,7 @@ EOF
   disable|uninstall)
     preflight
     if managed "$SERVICE"; then
-      systemctl --user stop "$UNIT"
+      stop_managed
       rm -- "$SERVICE"
     fi
     if managed "$DESKTOP"; then rm -- "$DESKTOP"; fi
@@ -157,14 +169,14 @@ EOF
     require_session
     # Stop only this project's managed unit; the chooser runs in the accessible
     # guest terminal so the user can see errors and use Ctrl+C after verifying.
-    if managed "$SERVICE"; then systemctl --user stop "$UNIT"; fi
+    if managed "$SERVICE"; then stop_managed; fi
     printf 'Choose the NVIDIA/dummy-plug monitor in the guest sharing dialog.\n'
     printf 'Stop any separate manual capture first. Press Ctrl+C when verified; then restart the startup service.\n'
     exec bash "$ROOT/run-guest.sh" --choose-display
     ;;
   stop)
     if managed "$SERVICE"; then
-      systemctl --user stop "$UNIT"
+      stop_managed
     elif [[ ! -e $SERVICE && ! -L $SERVICE ]]; then
       printf 'No managed startup service is installed.\n'
     else

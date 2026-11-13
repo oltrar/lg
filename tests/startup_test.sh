@@ -7,7 +7,7 @@ if [[ ${1:-} != --inner ]]; then
   trap 'rm -rf -- "$FIXTURE"' EXIT
   PROJECT="$FIXTURE/"'project space % $ " \ ` & (test)'
   mkdir -p "$PROJECT/scripts" "$PROJECT/tests" "$PROJECT/_build/host"
-  cp "$ROOT/setup-startup.sh" "$ROOT/run-guest.sh" "$ROOT/install.sh" "$ROOT/version.sh" "$PROJECT/"
+  cp "$ROOT/setup-startup.sh" "$ROOT/run-guest.sh" "$ROOT/install.sh" "$ROOT/version.sh" "$ROOT/check-video.sh" "$PROJECT/"
   cp "$ROOT/scripts/start-session.sh" "$PROJECT/scripts/"
   cp "$ROOT/scripts/capture-report.sh" "$PROJECT/scripts/"
   cp "$ROOT/scripts/build-info.sh" "$PROJECT/scripts/"
@@ -44,6 +44,11 @@ export PATH="$FIXTURE/bin:$PATH"
 cat > "$FIXTURE/bin/systemctl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$LG_TEST_LOG"
+case "$*" in
+  *'show -p LoadState --value '*) printf '%s\n' "${LG_TEST_LOAD_STATE:-loaded}"; exit "${LG_TEST_LOAD_RESULT:-0}" ;;
+  *'show -p ActiveState --value '*) printf 'inactive\n' ;;
+  *reset-failed*) printf 'Unit not loaded\n' >&2; exit 1 ;;
+esac
 EOF
 chmod +x "$FIXTURE/bin/systemctl"
 cat > "$ROOT/_build/host/looking-glass-host" <<'EOF'
@@ -53,8 +58,18 @@ printf 'TEST: capture process started\n'
 EOF
 printf '#!/usr/bin/env bash\nprintf "TEST: guest GPU diagnostics\\n"\n' > "$ROOT/doctor.sh"
 chmod +x "$ROOT/_build/host/looking-glass-host"
-mkdir -p "$ROOT/overlay"
+cat > "$ROOT/setup-ivshmem.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'TEST: device permissions %s\n' "$*" >> "$LG_TEST_LOG"
+EOF
+cat > "$FIXTURE/bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+exec "$@"
+EOF
+chmod +x "$FIXTURE/bin/sudo"
+mkdir -p "$ROOT/overlay" "$ROOT/tools"
 printf 'source version one\n' > "$ROOT/overlay/test.c"
+printf 'frame verifier source\n' > "$ROOT/tools/test.c"
 printf 'LG_COMMIT=test-upstream\n' > "$ROOT/versions.env"
 printf '_build/\n' > "$ROOT/.gitignore"
 cat > "$ROOT/build.sh" <<'EOF'
@@ -100,6 +115,19 @@ bash "$ROOT/setup-startup.sh" repair
 pattern=$(sed -n 's/^EnvironmentFile=//p' "$SERVICE")
 "$FIXTURE/envfile-path-test" "${pattern//%%/%}" "$OPTIONS"
 grep -Fxq 'LG_FPS=120' "$OPTIONS"
+
+# A warning with exit code zero must block installation and keep the old unit.
+# A stale managed file + an absent manager unit must not abort installation.
+: > "$LG_TEST_LOG"
+LG_TEST_LOAD_STATE=not-found LG_TEST_LOAD_RESULT=1 bash "$ROOT/setup-startup.sh" stop
+! grep -Fxq -- '--user stop looking-glass-host.service' "$LG_TEST_LOG"
+# A real stop error must remain an error (do not blindly ignore failures).
+mkdir -p "$FIXTURE/stop-error"
+printf '#!/usr/bin/env bash\nif [[ $* == *" stop "* ]]; then exit 1; fi\nprintf "loaded\\n"\n' > "$FIXTURE/stop-error/systemctl"
+chmod +x "$FIXTURE/stop-error/systemctl"
+if PATH="$FIXTURE/stop-error:$PATH" bash "$ROOT/setup-startup.sh" stop; then
+  printf 'FAIL: real service-stop failure was swallowed\n' >&2; exit 1
+fi
 
 # A warning with exit code zero must block installation and keep the old unit.
 mkdir -p "$FIXTURE/warning-tool"
@@ -174,6 +202,13 @@ XDG_SESSION_TYPE=x11 bash "$ROOT/scripts/start-session.sh"
 # the service. Version output distinguishes source/binary changes afterward.
 bash "$ROOT/install.sh" > "$FIXTURE/install.log"
 grep -Fxq 'TEST: build invoked' "$LG_TEST_LOG"
+grep -q 'TEST: device permissions --user .* --install' "$LG_TEST_LOG"
+[[ -f $XDG_CONFIG_HOME/looking-glass-linux-wayland/choose-next ]]
+bash "$ROOT/run-guest.sh"
+grep -Fxq 'pipewire:restore=no' "$LG_TEST_CAPTURE_LOG"
+[[ ! -e $XDG_CONFIG_HOME/looking-glass-linux-wayland/choose-next ]]
+bash "$ROOT/run-guest.sh"
+grep -Fxq 'pipewire:restore=yes' "$LG_TEST_CAPTURE_LOG"
 [[ -f $ROOT/_build/build-info.txt ]]
 grep -Fxq "project_commit=$(git -C "$ROOT" rev-parse HEAD)" "$ROOT/_build/build-info.txt"
 grep -Fxq 'project_branch=main' "$ROOT/_build/build-info.txt"
@@ -216,4 +251,4 @@ if bash "$ROOT/setup-startup.sh" enable; then
   printf 'FAIL: replaced startup symlink\n' >&2; exit 1
 fi
 [[ -L $DESKTOP ]]
-printf 'PASS: EnvironmentFile regression/repair, warning refusal, installer/build identity, user startup and private reports\n'
+printf 'PASS: missing-unit install/first start, real stop errors, device setup, fresh choice once, unit validation, build identity and private reports\n'

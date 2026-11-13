@@ -365,7 +365,7 @@ new file mode 100644
 diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform/Linux/capture/pipewire/src/pipewire.c
 --- a/host/platform/Linux/capture/pipewire/src/pipewire.c
 +++ b/host/platform/Linux/capture/pipewire/src/pipewire.c
-@@ -1,493 +1,415 @@
+@@ -1,493 +1,420 @@
  /**
   * Looking Glass
 - * Copyright © 2017-2025 The Looking Glass Authors
@@ -469,7 +469,10 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +  struct Option options[] = {
 +    {.module = "pipewire", .name = "fps",
 +     .description = "Requested maximum capture rate (compositor may limit it)",
-+     .type = OPTION_TYPE_INT, .value.x_int = 60, .validator = fpsValidator}, {0}
++     .type = OPTION_TYPE_INT, .value.x_int = 60, .validator = fpsValidator},
++    {.module = "pipewire", .name = "restore",
++     .description = "Reuse the saved monitor selection (no requests a fresh chooser)",
++     .type = OPTION_TYPE_BOOL, .value.x_bool = true}, {0}
 +  };
 +  option_register(options);
 +}
@@ -621,7 +624,8 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +  if (!portal_createScreenCastSession(this->portal, &this->sessionHandle))
 +    goto fail;
 +  stage = "ScreenCast.SelectSources";
-+  if (!portal_selectSource(this->portal, this->sessionHandle))
++  if (!portal_selectSource(this->portal, this->sessionHandle,
++        option_get_bool("pipewire", "restore")))
 +    goto fail;
 +  stage = "ScreenCast.Start / monitor selection";
 +  uint32_t node = portal_getPipewireNode(this->portal, this->sessionHandle);
@@ -962,6 +966,7 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +  pw_thread_loop_unlock(this->loop);
  fail:
 +  DEBUG_ERROR("PipeWire capture initialization failed during %s", stage);
++  DEBUG_INFO("For a removed/wrong monitor, run bash run-guest.sh --choose-display from an accessible guest desktop");
    pipewire_deinit();
    return false;
  }
@@ -1224,7 +1229,7 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 diff --git a/host/platform/Linux/capture/pipewire/src/portal.c b/host/platform/Linux/capture/pipewire/src/portal.c
 --- a/host/platform/Linux/capture/pipewire/src/portal.c
 +++ b/host/platform/Linux/capture/pipewire/src/portal.c
-@@ -1,428 +1,255 @@
+@@ -1,428 +1,270 @@
  /**
   * Looking Glass
 - * Copyright © 2017-2025 The Looking Glass Authors
@@ -1712,12 +1717,47 @@ diff --git a/host/platform/Linux/capture/pipewire/src/portal.c b/host/platform/L
 -  {
 -    DEBUG_WARN("Received more than one stream, discarding all but last one");
 -    while (count-- > 1)
--    {
++void portal_destroySession(struct Portal * p, char ** handle)
++{
++  if (!handle || !*handle) return;
++  g_dbus_connection_call_sync(p->conn, PORTAL_NAME, *handle,
++    "org.freedesktop.portal.Session", "Close", NULL, NULL,
++    G_DBUS_CALL_FLAGS_NONE, 5000, NULL, NULL);
++  g_clear_pointer(handle, g_free);
++}
++bool portal_selectSource(struct Portal * p, const char * session, bool restore)
++{
++  g_autoptr(GVariant) version = g_dbus_proxy_get_cached_property(p->screenCast,
++    "version");
++  g_autofree char * token = NULL;
++  bool restoring = false;
++  g_autoptr(GVariant) modes = g_dbus_proxy_get_cached_property(p->screenCast,
++    "AvailableCursorModes");
++  if (!modes || !(g_variant_get_uint32(modes) & 2))
++  {
++    DEBUG_ERROR("The portal must support an embedded cursor (KDE/GNOME)");
++    return false;
++  }
++  GVariantBuilder options;
++  g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
++  g_variant_builder_add(&options, "{sv}", "types", g_variant_new_uint32(1));
++  g_variant_builder_add(&options, "{sv}", "multiple", g_variant_new_boolean(FALSE));
++  g_variant_builder_add(&options, "{sv}", "cursor_mode", g_variant_new_uint32(2));
++  if (version && g_variant_get_uint32(version) >= 4 && p->tokenPath)
++  {
++    g_variant_builder_add(&options, "{sv}", "persist_mode", g_variant_new_uint32(2));
++    gsize length = 0;
++    if (restore && g_file_get_contents(p->tokenPath, &token, &length, NULL) &&
++        length > 0 && length < 4096 && g_utf8_validate(token, length, NULL))
+     {
 -      g_autoptr(GVariant) prop = NULL;
 -      uint32_t node;
 -      g_variant_iter_loop(&iter, "(u@a{sv})", &node, &prop);
--    }
--  }
++      g_variant_builder_add(&options, "{sv}", "restore_token", g_variant_new_string(token));
++      restoring = true;
++      DEBUG_INFO("Requesting the saved monitor selection; use --choose-display to change it");
+     }
+   }
 -
 -  g_autoptr(GVariant) prop = NULL;
 -  g_variant_iter_loop(&iter, "(u@a{sv})", callback->opaque, &prop);
@@ -1777,39 +1817,8 @@ diff --git a/host/platform/Linux/capture/pipewire/src/portal.c b/host/platform/L
 -  if (err)
 -  {
 -    DEBUG_ERROR("Failed to call OpenPipeWireRemote on session: %s", err->message);
-+void portal_destroySession(struct Portal * p, char ** handle)
-+{
-+  if (!handle || !*handle) return;
-+  g_dbus_connection_call_sync(p->conn, PORTAL_NAME, *handle,
-+    "org.freedesktop.portal.Session", "Close", NULL, NULL,
-+    G_DBUS_CALL_FLAGS_NONE, 5000, NULL, NULL);
-+  g_clear_pointer(handle, g_free);
-+}
-+bool portal_selectSource(struct Portal * p, const char * session)
-+{
-+  g_autoptr(GVariant) version = g_dbus_proxy_get_cached_property(p->screenCast,
-+    "version");
-+  g_autofree char * token = NULL;
-+  g_autoptr(GVariant) modes = g_dbus_proxy_get_cached_property(p->screenCast,
-+    "AvailableCursorModes");
-+  if (!modes || !(g_variant_get_uint32(modes) & 2))
-+  {
-+    DEBUG_ERROR("The portal must support an embedded cursor (KDE/GNOME)");
-+    return false;
-+  }
-+  GVariantBuilder options;
-+  g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
-+  g_variant_builder_add(&options, "{sv}", "types", g_variant_new_uint32(1));
-+  g_variant_builder_add(&options, "{sv}", "multiple", g_variant_new_boolean(FALSE));
-+  g_variant_builder_add(&options, "{sv}", "cursor_mode", g_variant_new_uint32(2));
-+  if (version && g_variant_get_uint32(version) >= 4 && p->tokenPath)
-+  {
-+    g_variant_builder_add(&options, "{sv}", "persist_mode", g_variant_new_uint32(2));
-+    gsize length = 0;
-+    if (g_file_get_contents(p->tokenPath, &token, &length, NULL) &&
-+        length > 0 && length < 4096 && g_utf8_validate(token, length, NULL))
-+      g_variant_builder_add(&options, "{sv}", "restore_token", g_variant_new_string(token));
-+  }
++  if (!restoring)
++    DEBUG_INFO("Requesting monitor selection: choose the NVIDIA/dummy-plug display in the guest portal");
 +  g_autoptr(GVariant) result = request(p, "SelectSources", session, &options);
 +  return result != NULL;
 +}
@@ -1829,6 +1838,12 @@ diff --git a/host/platform/Linux/capture/pipewire/src/portal.c b/host/platform/L
 +    return 0;
 +  }
 +  g_variant_get_child(streams, 0, "(u@a{sv})", &node, &properties);
++  const char * id = NULL;
++  int width = 0, height = 0;
++  g_variant_lookup(properties, "id", "&s", &id);
++  g_variant_lookup(properties, "size", "(ii)", &width, &height);
++  DEBUG_INFO("Portal selected stream: node %u, id %s, logical size %dx%d",
++    node, id ? id : "not supplied", width, height);
 +  if (p->tokenPath && g_variant_lookup(result, "restore_token", "s", &token))
 +  {
 +    g_autoptr(GError) error = NULL;
@@ -1836,6 +1851,8 @@ diff --git a/host/platform/Linux/capture/pipewire/src/portal.c b/host/platform/L
 +          G_FILE_SET_CONTENTS_CONSISTENT | G_FILE_SET_CONTENTS_DURABLE,
 +          0600, &error))
 +      DEBUG_WARN("Cannot save portal selection: %s", error->message);
++    else
++      DEBUG_INFO("Saved monitor selection for future capture startup");
 +  }
 +  return node;
 +}
@@ -1875,3 +1892,15 @@ diff --git a/host/platform/Linux/capture/pipewire/src/portal.c b/host/platform/L
 +    DEBUG_ERROR("Cannot get PipeWire descriptor: %s", error->message);
    return fd;
  }
+diff --git a/host/platform/Linux/capture/pipewire/src/portal.h b/host/platform/Linux/capture/pipewire/src/portal.h
+--- a/host/platform/Linux/capture/pipewire/src/portal.h
++++ b/host/platform/Linux/capture/pipewire/src/portal.h
+@@ -35,6 +35,7 @@
+ void portal_free(struct Portal * portal);
+ bool portal_createScreenCastSession(struct Portal * portal, char ** handle);
+ void portal_destroySession(struct Portal * portal, char ** sessionHandle);
+-bool portal_selectSource(struct Portal * portal, const char * sessionHandle);
++/* restore=false skips the saved token once; a successful new choice is saved. */
++bool portal_selectSource(struct Portal * portal, const char * sessionHandle, bool restore);
+ uint32_t portal_getPipewireNode(struct Portal * portal, const char * sessionHandle);
+ int portal_openPipewireRemote(struct Portal * portal, const char * sessionHandle);

@@ -99,11 +99,13 @@ example `looking-glass-linux`) and update only that VM's client `shmFile` path.
 The guest discovers by PCI ID/address, not by the libvirt shmem name. Use distinct
 SPICE ports for concurrently running VMs as well.
 
-Keep a way to operate the first guest screen-sharing chooser, such as a physical
-display on the NVIDIA GPU or a temporary console. Choose the NVIDIA-driven
-monitor. After capture is verified, shut down the VM and remove its emulated
-video device to prevent SPICE video fallback. Future portal prompts may still
-need interaction in the guest; login-screen capture is not implemented.
+During setup, keep QXL/the virtual console available to operate the guest's
+screen-sharing chooser. Enable the NVIDIA/dummy-plug monitor and follow
+[Choose the NVIDIA/dummy-plug display](#choose-the-nvidiadummy-plug-display)
+below. Verify that Looking Glass captures that output and restores it after
+restarting capture **before** removing QXL. Then shut down the VM and use the
+final `video type='none'` configuration. Future portal prompts may still need
+interaction in the guest; login-screen capture is not implemented.
 
 After VM startup, grant the physical host user access to the existing backing
 file using your usual Looking Glass permission setup. A temporary ACL preserves
@@ -229,6 +231,76 @@ Wayland input-injection APIs. Adjust guest mouse acceleration if needed.
 Stop manual capture with Ctrl+C. The optional startup setup below runs capture
 in your graphical user session.
 
+### Choose the NVIDIA/dummy-plug display
+
+If Looking Glass shows QXL's desktop, it may have saved that monitor as its
+capture source. Removing QXL does not select the NVIDIA monitor automatically.
+The capture application requests monitors from KDE/GNOME's ScreenCast portal;
+the **monitor you choose** determines which display is captured. A dummy plug
+provides an output, but that output must also be enabled in the guest desktop.
+
+While QXL is still available:
+
+1. In KDE **Display Configuration** or GNOME **Settings → Displays**, enable
+   the monitor connected to the passed-through NVIDIA GPU. Use an SDR mode.
+   Temporarily extend the desktop rather than mirroring QXL, so the two screens
+   can be distinguished. KDE's `kscreen-doctor -o` lists outputs and their state;
+   `bash doctor.sh` also maps DRM connectors to their PCI GPU/driver.
+2. Stop any separately launched manual capture with Ctrl+C. From a guest desktop
+   terminal, run this without sudo:
+
+   ```bash
+   bash setup-startup.sh choose-display
+   ```
+
+   This stops this project's managed startup service if installed, then runs
+   capture in the foreground with a **fresh monitor-selection request**. Choose
+   the NVIDIA/dummy-plug monitor in the guest sharing dialog, rather than QXL's
+   virtual monitor. The old restore token is omitted for this run; a successful
+   new choice replaces it. Cancelling leaves the previous saved selection intact.
+3. Verify the LG client shows the NVIDIA output. For example, place a terminal
+   on that output and confirm it appears in LG while QXL shows a different area.
+   Press Ctrl+C after verifying. If startup is enabled, run:
+
+   ```bash
+   bash setup-startup.sh start
+   ```
+
+   Confirm the same monitor is restored. Otherwise, run `bash run-guest.sh`
+   normally to verify restoration before stopping it again.
+4. Shut down the VM, change its emulated video model from QXL to **None**, boot
+   and log in. Automatic startup now requests the saved NVIDIA selection.
+
+For manual capture, the equivalent option is:
+
+```bash
+bash run-guest.sh --choose-display
+```
+
+Both chooser commands use the normal manual-run defaults. If your setup needs
+a particular IVSHMEM device or frame rate, supply the same overrides, for example
+`LG_SHM=ivshmem:0000:09:02.0 LG_FPS=120 bash setup-startup.sh choose-display`.
+The chooser command preserves `autostart.env`; it does not copy its settings
+into your terminal. Ordinary future runs restore the new selection by default.
+`LG_CAPTURE_RESTORE=no` (or the binary option `pipewire:restore=no`) requests a
+new choice on every run; keep the default `yes` for unattended startup.
+
+The portal does not provide a portable connector-name/GPU-index selection
+argument. Choosing through its monitor dialog works with both KDE and GNOME.
+Its saved stream ID is opaque and is not necessarily an HDMI/DP connector name.
+The log now reports whether a saved choice is requested, the selected stream's
+ID/logical size when supplied, and whether a new restore token was saved.
+Restore tokens remain private and are not printed.
+
+If the NVIDIA output is missing from the chooser, check that it is enabled in
+the active Wayland desktop; capture cannot enable a display or change which
+GPU the compositor uses. If capture still fails with QXL removed, retain the
+service journal and `bash doctor.sh` output. A missing active desktop, a new
+portal prompt, and a PipeWire format error require different fixes. Re-enable
+the temporary console or use your existing way to operate the GPU desktop to
+handle any prompt. Desktop policy may require consent again after a display
+topology change; this option does not bypass it.
+
 ## 6. Optional: start automatically after guest login
 
 After building and confirming `bash run-guest.sh` works, run this **inside the
@@ -267,6 +339,7 @@ Optional startup settings are saved in
 ```ini
 LG_SHM=ivshmem
 LG_FPS=60
+LG_CAPTURE_RESTORE=yes
 ```
 
 For example, use `LG_SHM=ivshmem:0000:09:02.0` to select a particular device and
@@ -323,6 +396,10 @@ Under **both KDE and GNOME**, using a fresh login to each:
 8. With startup enabled, reboot and log in. Check that the service starts once,
    restore/accept portal permission if prompted, and verify frames. Log out and
    check capture stops; repeat after logging into the other desktop.
+9. With QXL still present, choose the NVIDIA output, distinguish the two extended
+   desktops in LG, and restart capture to verify the saved choice. Then test a
+   reboot with QXL removed. Keep this separate from merely seeing the GPU output
+   in another application.
 
 Run `bash doctor.sh` in the guest for read-only diagnostics. Keep guest and
 physical-host client logs separate, and do not share the portal restore tokens
@@ -385,10 +462,12 @@ NVENC or a professional NVIDIA card.
 for the Windows guest software. Native Arch and Debian CI compile and link the
 complete guest application and execute all test suites. The
 optional KVMFR module and actual KDE/GNOME/NVIDIA desktop/audio integration
-still need broader validation. The user has confirmed screen capture works in
-their CachyOS/NVIDIA guest with plain IVSHMEM; keyboard, mouse, sound and shared
-microphone have not yet been tested there. The default raw PCI path also passed
-a QEMU guest test without KVMFR. Read `VALIDATION.md` for evidence and limits.
+still need broader validation. The user has confirmed screen capture, keyboard,
+mouse and login startup in their CachyOS guest with plain IVSHMEM, with capture
+currently showing the QXL display. Capturing the NVIDIA/dummy-plug output after
+reselection/removing QXL still needs a retry; sound and shared microphone remain
+untested. The default raw PCI path also passed a QEMU guest test without KVMFR.
+Read `VALIDATION.md` for evidence and limits.
 
 ## What is implemented
 
@@ -404,6 +483,8 @@ a QEMU guest test without KVMFR. Read `VALIDATION.md` for evidence and limits.
 - Scripts, a separate Linux-VM client configuration, VM XML examples and tests.
 - Optional KDE/GNOME login startup with a user service, persistent settings,
   journal logs, and enable/disable/start/restart/stop/status commands.
+- A one-time monitor chooser that skips a saved QXL selection and saves the new
+  monitor for subsequent startup, with selected-stream diagnostics.
 
 ## Material limitations
 

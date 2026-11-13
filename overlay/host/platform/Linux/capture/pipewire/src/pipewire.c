@@ -55,7 +55,10 @@ static void pipewire_initOptions(void)
   struct Option options[] = {
     {.module = "pipewire", .name = "fps",
      .description = "Requested maximum capture rate (compositor may limit it)",
-     .type = OPTION_TYPE_INT, .value.x_int = 60, .validator = fpsValidator}, {0}
+     .type = OPTION_TYPE_INT, .value.x_int = 60, .validator = fpsValidator},
+    {.module = "pipewire", .name = "restore",
+     .description = "Reuse the saved monitor selection (no requests a fresh chooser)",
+     .type = OPTION_TYPE_BOOL, .value.x_bool = true}, {0}
   };
   option_register(options);
 }
@@ -179,7 +182,8 @@ static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
   if (!portal_createScreenCastSession(this->portal, &this->sessionHandle))
     goto fail;
   stage = "ScreenCast.SelectSources";
-  if (!portal_selectSource(this->portal, this->sessionHandle))
+  if (!portal_selectSource(this->portal, this->sessionHandle,
+        option_get_bool("pipewire", "restore")))
     goto fail;
   stage = "ScreenCast.Start / monitor selection";
   uint32_t node = portal_getPipewireNode(this->portal, this->sessionHandle);
@@ -272,6 +276,7 @@ failLocked:
   pw_thread_loop_unlock(this->loop);
 fail:
   DEBUG_ERROR("PipeWire capture initialization failed during %s", stage);
+  DEBUG_INFO("For a removed/wrong monitor, run bash run-guest.sh --choose-display from an accessible guest desktop");
   pipewire_deinit();
   return false;
 }

@@ -178,11 +178,12 @@ void portal_destroySession(struct Portal * p, char ** handle)
     G_DBUS_CALL_FLAGS_NONE, 5000, NULL, NULL);
   g_clear_pointer(handle, g_free);
 }
-bool portal_selectSource(struct Portal * p, const char * session)
+bool portal_selectSource(struct Portal * p, const char * session, bool restore)
 {
   g_autoptr(GVariant) version = g_dbus_proxy_get_cached_property(p->screenCast,
     "version");
   g_autofree char * token = NULL;
+  bool restoring = false;
   g_autoptr(GVariant) modes = g_dbus_proxy_get_cached_property(p->screenCast,
     "AvailableCursorModes");
   if (!modes || !(g_variant_get_uint32(modes) & 2))
@@ -199,10 +200,16 @@ bool portal_selectSource(struct Portal * p, const char * session)
   {
     g_variant_builder_add(&options, "{sv}", "persist_mode", g_variant_new_uint32(2));
     gsize length = 0;
-    if (g_file_get_contents(p->tokenPath, &token, &length, NULL) &&
+    if (restore && g_file_get_contents(p->tokenPath, &token, &length, NULL) &&
         length > 0 && length < 4096 && g_utf8_validate(token, length, NULL))
+    {
       g_variant_builder_add(&options, "{sv}", "restore_token", g_variant_new_string(token));
+      restoring = true;
+      DEBUG_INFO("Requesting the saved monitor selection; use --choose-display to change it");
+    }
   }
+  if (!restoring)
+    DEBUG_INFO("Requesting monitor selection: choose the NVIDIA/dummy-plug display in the guest portal");
   g_autoptr(GVariant) result = request(p, "SelectSources", session, &options);
   return result != NULL;
 }
@@ -222,6 +229,12 @@ uint32_t portal_getPipewireNode(struct Portal * p, const char * session)
     return 0;
   }
   g_variant_get_child(streams, 0, "(u@a{sv})", &node, &properties);
+  const char * id = NULL;
+  int width = 0, height = 0;
+  g_variant_lookup(properties, "id", "&s", &id);
+  g_variant_lookup(properties, "size", "(ii)", &width, &height);
+  DEBUG_INFO("Portal selected stream: node %u, id %s, logical size %dx%d",
+    node, id ? id : "not supplied", width, height);
   if (p->tokenPath && g_variant_lookup(result, "restore_token", "s", &token))
   {
     g_autoptr(GError) error = NULL;
@@ -229,6 +242,8 @@ uint32_t portal_getPipewireNode(struct Portal * p, const char * session)
           G_FILE_SET_CONTENTS_CONSISTENT | G_FILE_SET_CONTENTS_DURABLE,
           0600, &error))
       DEBUG_WARN("Cannot save portal selection: %s", error->message);
+    else
+      DEBUG_INFO("Saved monitor selection for future capture startup");
   }
   return node;
 }

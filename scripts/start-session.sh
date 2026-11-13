@@ -17,7 +17,7 @@ fi
 present=()
 absent=()
 for variable in WAYLAND_DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP \
-                XDG_SESSION_DESKTOP XDG_CONFIG_HOME XDG_RUNTIME_DIR \
+                XDG_SESSION_DESKTOP XDG_CONFIG_HOME XDG_STATE_HOME XDG_RUNTIME_DIR \
                 DBUS_SESSION_BUS_ADDRESS DISPLAY XAUTHORITY; do
   if [[ -v $variable ]]; then present+=("$variable"); else absent+=("$variable"); fi
 done

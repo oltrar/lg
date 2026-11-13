@@ -9,6 +9,7 @@ if [[ ${1:-} != --inner ]]; then
   mkdir -p "$PROJECT/scripts" "$PROJECT/tests" "$PROJECT/_build/host"
   cp "$ROOT/setup-startup.sh" "$ROOT/run-guest.sh" "$PROJECT/"
   cp "$ROOT/scripts/start-session.sh" "$PROJECT/scripts/"
+  cp "$ROOT/scripts/capture-report.sh" "$PROJECT/scripts/"
   cp "$ROOT/tests/startup_test.sh" "$PROJECT/tests/"
   if (( EUID == 0 )); then
     if bash "$ROOT/setup-startup.sh" enable >"$FIXTURE/root.log" 2>&1; then
@@ -26,6 +27,7 @@ FIXTURE=${2:?Missing test fixture}
 export HOME="$FIXTURE/home"
 export XDG_CONFIG_HOME="$FIXTURE/"'config space % $ " \ ` & (test)'
 export XDG_RUNTIME_DIR="$FIXTURE/runtime"
+export XDG_STATE_HOME="$FIXTURE/state space"
 export XDG_SESSION_TYPE=wayland WAYLAND_DISPLAY=wayland-test
 export XDG_CURRENT_DESKTOP=KDE DBUS_SESSION_BUS_ADDRESS=unix:path=/test/bus
 export LG_TEST_LOG="$FIXTURE/systemctl.log"
@@ -41,7 +43,9 @@ chmod +x "$FIXTURE/bin/systemctl"
 cat > "$ROOT/_build/host/looking-glass-host" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$LG_TEST_CAPTURE_LOG"
+printf 'TEST: capture process started\n'
 EOF
+printf '#!/usr/bin/env bash\nprintf "TEST: guest GPU diagnostics\\n"\n' > "$ROOT/doctor.sh"
 chmod +x "$ROOT/_build/host/looking-glass-host"
 SERVICE="$XDG_CONFIG_HOME/systemd/user/looking-glass-host.service"
 DESKTOP="$XDG_CONFIG_HOME/autostart/looking-glass-host.desktop"
@@ -68,7 +72,7 @@ for ((attempt=0; attempt<100; ++attempt)); do
 done
 grep -Fxq -- '--user --no-block start looking-glass-host.service' "$LG_TEST_LOG"
 grep -Fxq -- '--user unset-environment XDG_SESSION_DESKTOP DISPLAY XAUTHORITY' "$LG_TEST_LOG"
-grep -Fxq -- '--user import-environment WAYLAND_DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_CONFIG_HOME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS' "$LG_TEST_LOG"
+grep -Fxq -- '--user import-environment WAYLAND_DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_CONFIG_HOME XDG_STATE_HOME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS' "$LG_TEST_LOG"
 
 # GNOME uses the same path. Missing desktop state and X11 must not start capture.
 export XDG_CURRENT_DESKTOP=GNOME
@@ -89,9 +93,30 @@ grep -Fxq 'pipewire:restore=no' "$LG_TEST_CAPTURE_LOG"
 grep -Fxq 'app:license=no' "$LG_TEST_CAPTURE_LOG"
 LG_CAPTURE_RESTORE=yes bash "$ROOT/run-guest.sh" --choose-display
 grep -Fxq 'pipewire:restore=no' "$LG_TEST_CAPTURE_LOG"
+REPORTS="$XDG_STATE_HOME/looking-glass-linux-wayland/reports"
+[[ -d $REPORTS ]]
+for ((attempt=0; attempt<100; ++attempt)); do
+  if grep -l 'TEST: capture process started' "$REPORTS"/*/capture.log >/dev/null; then break; fi
+  sleep 0.05
+done
+grep -l 'TEST: capture process started' "$REPORTS"/*/capture.log >/dev/null
+grep -l 'TEST: guest GPU diagnostics' "$REPORTS"/*/diagnostics.log >/dev/null
+for report in "$REPORTS"/*; do
+  [[ $(stat -c %a "$report") == 700 ]]
+  [[ $(stat -c %a "$report/capture.log") == 600 ]]
+  [[ $(stat -c %a "$report/diagnostics.log") == 600 ]]
+done
+before=$(find "$REPORTS" -mindepth 1 -maxdepth 1 -type d | wc -l)
 if LG_CAPTURE_RESTORE=invalid bash "$ROOT/run-guest.sh"; then
   printf 'FAIL: invalid capture restore setting was accepted\n' >&2; exit 1
 fi
+after=$(find "$REPORTS" -mindepth 1 -maxdepth 1 -type d | wc -l)
+(( after > before ))
+for ((attempt=0; attempt<100; ++attempt)); do
+  if grep -l 'LG_CAPTURE_RESTORE must be yes or no' "$REPORTS"/*/capture.log >/dev/null; then break; fi
+  sleep 0.05
+done
+grep -l 'LG_CAPTURE_RESTORE must be yes or no' "$REPORTS"/*/capture.log >/dev/null
 : > "$LG_TEST_LOG"
 XDG_SESSION_TYPE=x11 bash "$ROOT/scripts/start-session.sh"
 [[ ! -s $LG_TEST_LOG ]]
@@ -123,4 +148,4 @@ if bash "$ROOT/setup-startup.sh" enable; then
   printf 'FAIL: replaced startup symlink\n' >&2; exit 1
 fi
 [[ -L $DESKTOP ]]
-printf 'PASS: user startup, real desktop Exec parsing, service validation, one-time display choice and settings preservation\n'
+printf 'PASS: user startup, desktop Exec parsing, display choice, private persistent reports and settings preservation\n'

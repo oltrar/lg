@@ -4,7 +4,12 @@
 # native monitor selection, actual PipeWire frames and a fresh compositor boot.
 set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-if [[ ${1:-} != --inner ]]; then exec dbus-run-session -- bash "$0" --inner; fi
+if [[ ${1:-} != --inner ]]; then
+  if ((EUID == 0)); then
+    exec runuser -u nobody -- dbus-run-session -- bash "$0" --inner
+  fi
+  exec dbus-run-session -- bash "$0" --inner
+fi
 FIXTURE=$(mktemp -d)
 cleanup() {
   for process in "${HOST_PID:-}" "${SCENE_PID:-}" "${KWIN_PID:-}" "${WP_PID:-}" "${PW_PID:-}"; do
@@ -18,10 +23,12 @@ cleanup() {
 trap cleanup EXIT
 export XDG_RUNTIME_DIR="$FIXTURE/runtime" PIPEWIRE_RUNTIME_DIR="$FIXTURE/runtime"
 export XDG_CONFIG_HOME="$FIXTURE/config" XDG_DATA_HOME="$FIXTURE/data" XDG_CACHE_HOME="$FIXTURE/cache"
+export HOME="$FIXTURE/home"
 export WAYLAND_DISPLAY=lg-test XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE
 export LIBGL_ALWAYS_SOFTWARE=1 KWIN_COMPOSE=O2
+export QT_LOGGING_RULES='kwin_screencast.debug=true'
 unset KWIN_WAYLAND_NO_PERMISSION_CHECKS
-mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME/applications" "$XDG_CACHE_HOME"
+mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME/applications" "$XDG_CACHE_HOME" "$HOME"
 chmod 700 "$XDG_RUNTIME_DIR"
 for program in looking-glass-host lg-kde-source; do
   cat > "$XDG_DATA_HOME/applications/lg-test-$program.desktop" <<EOF
@@ -33,8 +40,8 @@ NoDisplay=true
 X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1
 EOF
 done
-kbuildsycoca5 --noincremental
-# Debian's executable has cap_sys_nice; Docker's bounding set omits it, so
+if command -v kbuildsycoca6 >/dev/null; then kbuildsycoca6 --noincremental; else kbuildsycoca5 --noincremental; fi
+# The packaged executable can have cap_sys_nice; Docker's bounding set omits it, so
 # execve returns EPERM. A byte-identical temporary copy has no file capability
 # and can use ordinary scheduling. Compositor capture checks remain enabled.
 cp -- /usr/bin/kwin_wayland "$FIXTURE/kwin_wayland"

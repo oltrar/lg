@@ -337,7 +337,7 @@ the full guest executable and a B7 LGMP client with no QXL, checks every receive
 pixel and reconnects clients repeatedly on portal and native KDE paths. A real
 Wayland protocol fixture checks connector restoration after QXL removal,
 compositor restart and position changes. Additional CI exercises a real KWin
-software/virtual compositor across two starts with its permission checks left
+software/virtual compositor on current Arch/KWin across two starts with its permission checks left
 enabled. These tests do not contain a passed-through NVIDIA GPU or a real GNOME
 desktop. See
 [VALIDATION.md](VALIDATION.md).

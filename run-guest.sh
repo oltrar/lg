@@ -5,6 +5,11 @@ BINARY=${LG_BINARY:-"$ROOT/_build/host/looking-glass-host"}
 DEVICE=${LG_SHM:-ivshmem}
 FPS=${LG_FPS:-60}
 RESTORE=${LG_CAPTURE_RESTORE:-yes}
+CHOOSE_NEXT=${XDG_CONFIG_HOME:-"$HOME/.config"}/looking-glass-linux-wayland/choose-next
+if [[ -f $CHOOSE_NEXT && ! -L $CHOOSE_NEXT && -O $CHOOSE_NEXT ]]; then
+  RESTORE=no
+  rm -- "$CHOOSE_NEXT"
+fi
 arguments=()
 for argument in "$@"; do
   case $argument in

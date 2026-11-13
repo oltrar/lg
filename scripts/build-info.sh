@@ -5,6 +5,7 @@ lgSourceFingerprint() {
   (
     cd -- "$root" || exit 1
     find overlay -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+    find tools -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
     sha256sum build.sh versions.env
   ) | sha256sum | cut -d ' ' -f 1
 }

@@ -1,5 +1,57 @@
 # Validation record
 
+## Main installation, missing units, topology changes and real video — 2026-11-13
+
+The new full PipeWire-to-LGMP integration exposed a publication failure that
+the earlier stubbed framebuffer test could not detect. Production snapshots
+used realloc, which guarantees only 16-byte alignment on this platform. B7's
+framebuffer_write_avx2 uses _mm256_stream_load_si256 and requires 32-byte source
+alignment. Large allocations commonly have page+16 addresses. This can fault
+after the first successful capture copy, before the IVSHMEM-write log marker.
+Snapshots now use posix_memalign(32). A negative-control test forks the real B7
+writer with a deliberately 16-but-not-32-aligned input and requires SIGSEGV on
+AVX2 systems; the aligned input must publish matching bytes. Backend ingestion
+also asserts alignment, and the full live integration exercises actual writes.
+This is a demonstrated code defect, not hardware-specific proof from the user's
+VM. The old QXL image can still have been SPICE fallback throughout.
+
+The latest user retry still showed QXL and no NVIDIA feed after removing QXL.
+They also reported install.sh stopped with a service-not-found error. No actual
+capture-stage log from that retry is available; hardware causation is unproven.
+
+Three additional code paths could independently break this workflow:
+
+- start-session.sh called reset-failed before the unit had ever been loaded;
+  unlike start, that operation does not load the unit. It now resets only an
+  existing failed unit. The installer reloads before stopping old managed units
+  and handles an actual not-found result without swallowing other stop failures.
+- B7 initializes capture before its first client, deinitializes when idle, then
+  initializes again when a client connects. The backend previously closed the
+  entire portal session each time. A fresh-choice run requested another chooser
+  on every initialization. Deinit now pauses the stream, init resumes the same
+  selected monitor, and final free closes the session once.
+- The permission rule was pinned to a guest BDF even in auto-discovery mode.
+  Removing QXL can renumber PCI devices. Auto mode now re-discovers exactly one
+  IVSHMEM device; explicit device selection remains pinned and ambiguous/bound
+  devices are refused. install.sh replaces the older rule.
+
+Installation now installs missing Arch dependencies, builds, configures raw PCI
+permissions, registers startup and selects a fresh monitor. A new ExecStartPost
+checker acts as a real B7 LGMP subscriber against the same mapping. Startup is
+successful only after a complete nontruncated raw SDR frame is received. It has
+a bounded timeout and cannot mistake a SPICE/QXL image for capture success.
+The README has one main installation path; update.sh always updates from main.
+
+Regression fixtures reproduce missing/unloaded-unit failures, preserve genuine
+stop errors, exercise one-time selection and the actual permission helper across
+PCI renumbering. New integration tests launch a real private PipeWire daemon,
+a padded BGRA/MemFd producer, the real full guest executable, and the production
+B7 LGMP verifier. They check every pixel, initial idle and three reconnects,
+requiring only one portal session until shutdown. There is no QXL in this test.
+The portal consent UI and compositor producer are fixtures, not KDE/GNOME/NVIDIA.
+Native CI results are recorded with the change; hardware success is not claimed.
+
+
 ## Service options path, repair and build identity — 2026-11-13
 
 The user's actual journal showed `EnvironmentFile= path is not absolute,

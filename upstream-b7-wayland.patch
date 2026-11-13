@@ -404,7 +404,7 @@ new file mode 100644
 diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform/Linux/capture/pipewire/src/pipewire.c
 --- a/host/platform/Linux/capture/pipewire/src/pipewire.c
 +++ b/host/platform/Linux/capture/pipewire/src/pipewire.c
-@@ -1,493 +1,473 @@
+@@ -1,493 +1,515 @@
  /**
   * Looking Glass
 - * Copyright © 2017-2025 The Looking Glass Authors
@@ -461,11 +461,6 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -  struct spa_hook         coreListener;
 -  struct pw_stream      * stream;
 -  struct spa_hook         streamListener;
--
--  bool          stop;
--  bool          hasFormat;
--  bool          formatChanged;
--  int           width, height, dataHeight, pitch;
 +  struct Portal * portal;
 +  char * sessionHandle;
 +  struct pw_thread_loop * loop;
@@ -479,25 +474,35 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +  bool loggedBuffer, loggedCopy, loggedWrite, warnedNoFrame;
 +  uint64_t captureStartedAt, receivedBuffers, rejectedBuffers;
 +  unsigned width, height, formatVer;
-   CaptureFormat format;
++  CaptureFormat format;
++  /* Only the Looking Glass capture thread touches the snapshot. */
++  uint8_t * snapshot;
++  size_t capacity;
++  size_t frameHeaderSize;
++  unsigned readyWidth, readyHeight, readyVersion, dataHeight;
++  CaptureFormat readyFormat;
++};
++static struct pipewire * this;
++static bool pipewire_deinit(void);
++static bool pipewire_shutdown(void);
+ 
+-  bool          stop;
+-  bool          hasFormat;
+-  bool          formatChanged;
+-  int           width, height, dataHeight, pitch;
+-  CaptureFormat format;
 -  bool          hdr;
 -  bool          hdrPQ;
 -  uint8_t     * frameData;
 -  unsigned int  formatVer;
-+  /* Only the Looking Glass capture thread touches the snapshot. */
-+  uint8_t * snapshot;
-+  size_t capacity;
-+  unsigned readyWidth, readyHeight, readyVersion, dataHeight;
-+  CaptureFormat readyFormat;
- };
+-};
 -
 -static struct pipewire * this = NULL;
 -
 -// forwards
 -
-+static struct pipewire * this;
- static bool pipewire_deinit(void);
- 
+-static bool pipewire_deinit(void);
+-
 -// implementation
 -
 +static bool fpsValidator(struct Option * opt, const char ** error)
@@ -600,6 +605,11 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +  struct pw_buffer * buffer;
 +  while ((buffer = pw_stream_dequeue_buffer(this->stream)))
 +  {
++    if (this->stop)
++    {
++      pw_stream_queue_buffer(this->stream, buffer);
++      continue;
++    }
 +    ++this->receivedBuffers;
 +    if (!this->loggedBuffer && buffer->buffer && buffer->buffer->n_datas && buffer->buffer->datas)
 +    {
@@ -801,6 +811,25 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -  DEBUG_ASSERT(this);
 -  this->stop = false;
 -
++  /* B7's per-frame allocation includes the page before FrameBuffer.data. */
++  this->frameHeaderSize = *alignSize;
++  /* B7 deinitializes capture whenever its last LGMP client disconnects, even
++   * immediately after initial setup. Keep the consent/session and chosen
++   * monitor alive across that idle transition; resume the SAME stream. */
++  if (this->stream)
++  {
++    pw_thread_loop_lock(this->loop);
++    this->stop = false;
++    int status = this->failed ? -EPIPE : pw_stream_set_active(this->stream, true);
++    pw_thread_loop_unlock(this->loop);
++    if (status < 0)
++    {
++      DEBUG_ERROR("Cannot resume the selected monitor: %s", strerror(-status));
++      return false;
++    }
++    DEBUG_INFO("Resuming the existing monitor session (no new chooser)");
++    return true;
++  }
 +  const char * stage = "opening the desktop portal";
 +  this->stop = this->failed = this->hasFormat = this->connected = false;
 +  this->warnedBuffer = false;
@@ -928,7 +957,8 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -    PW_KEY_MEDIA_ROLE, "Screen", NULL));
 +  stage = "creating the PipeWire capture stream";
 +  this->stream = pw_stream_new(this->core, "Looking Glass Linux Guest",
-+    pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY,
++    pw_properties_new(PW_KEY_NODE_NAME, "looking-glass-capture",
++      PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY,
 +      "Capture", PW_KEY_MEDIA_ROLE, "Screen", NULL));
    if (!this->stream)
    {
@@ -996,9 +1026,10 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +failLocked:
 +  pw_thread_loop_unlock(this->loop);
  fail:
+-  pipewire_deinit();
 +  DEBUG_ERROR("PipeWire capture initialization failed during %s", stage);
 +  DEBUG_INFO("For a removed/wrong monitor, run bash run-guest.sh --choose-display from an accessible guest desktop");
-   pipewire_deinit();
++  pipewire_shutdown();
    return false;
  }
 -
@@ -1012,6 +1043,8 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -  pw_thread_loop_signal(this->threadLoop, false);
 -}
 -
++  if (this->stream && pw_stream_set_active(this->stream, false) < 0)
++    this->failed = true;
 +  discardPending();
 +  pw_thread_loop_signal(this->loop, false);
 +  pw_thread_loop_unlock(this->loop);
@@ -1038,6 +1071,11 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -  }
 -
 -  if (this->sessionHandle)
++  pipewire_stop();
++  return true;
++}
++static bool pipewire_shutdown(void)
++{
 +  pipewire_stop();
 +  /* Stop outside the lock; no callbacks can run after stop returns. */
 +  if (this->started)
@@ -1071,7 +1109,7 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
  {
 -  DEBUG_ASSERT(this);
 -  pw_deinit();
-+  pipewire_deinit();
++  pipewire_shutdown();
 +  free(this->snapshot);
    free(this);
    this = NULL;
@@ -1152,9 +1190,13 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +    return rejectBuffer("unmapped, unsupported or out-of-bounds layout", data);
 +  if (layout.packedSize > this->capacity)
 +  {
-+    uint8_t * memory = realloc(this->snapshot, layout.packedSize);
-+    if (!memory)
++    /* B7 framebuffer_write uses aligned SSE/AVX2 streaming loads. malloc /
++     * realloc promise only 16-byte alignment on x86-64; large allocations
++     * commonly land at page+16 and fault on the first 32-byte AVX2 load. */
++    void * memory = NULL;
++    if (posix_memalign(&memory, 32, layout.packedSize) != 0)
 +      return CAPTURE_RESULT_ERROR;
++    free(this->snapshot);
 +    this->snapshot = memory;
 +    this->capacity = layout.packedSize;
 +  }
@@ -1231,10 +1273,13 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -  frame->damageRectsCount = 0;
 -
 +  const size_t pitch = (size_t)this->readyWidth * 4;
-+  if (!pitch || !this->readyHeight || maxFrameSize < pitch)
++  if (maxFrameSize < this->frameHeaderSize)
 +    return CAPTURE_RESULT_ERROR;
-+  this->dataHeight = maxFrameSize / pitch < this->readyHeight ?
-+    maxFrameSize / pitch : this->readyHeight;
++  const size_t payload = maxFrameSize - this->frameHeaderSize;
++  if (!pitch || !this->readyHeight || payload < pitch)
++    return CAPTURE_RESULT_ERROR;
++  this->dataHeight = payload / pitch < this->readyHeight ?
++    payload / pitch : this->readyHeight;
 +  *frame = (CaptureFrame){
 +    .formatVer = this->readyVersion,
 +    .screenWidth = this->readyWidth, .screenHeight = this->readyHeight,
@@ -1262,7 +1307,8 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -
 -  pw_thread_loop_accept(this->threadLoop);
 +  const size_t size = (size_t)this->readyWidth * 4 * this->dataHeight;
-+  if (size > maxFrameSize || !this->snapshot)
++  if (maxFrameSize < this->frameHeaderSize ||
++      size > maxFrameSize - this->frameHeaderSize || !this->snapshot)
 +    return CAPTURE_RESULT_ERROR;
 +  if (!framebuffer_write(frame, this->snapshot, size))
 +    return CAPTURE_RESULT_ERROR;

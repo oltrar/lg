@@ -41,11 +41,13 @@ struct pipewire
   /* Only the Looking Glass capture thread touches the snapshot. */
   uint8_t * snapshot;
   size_t capacity;
+  size_t frameHeaderSize;
   unsigned readyWidth, readyHeight, readyVersion, dataHeight;
   CaptureFormat readyFormat;
 };
 static struct pipewire * this;
 static bool pipewire_deinit(void);
+static bool pipewire_shutdown(void);
 
 static bool fpsValidator(struct Option * opt, const char ** error)
 {
@@ -101,6 +103,11 @@ static void streamProcess(void * opaque)
   struct pw_buffer * buffer;
   while ((buffer = pw_stream_dequeue_buffer(this->stream)))
   {
+    if (this->stop)
+    {
+      pw_stream_queue_buffer(this->stream, buffer);
+      continue;
+    }
     ++this->receivedBuffers;
     if (!this->loggedBuffer && buffer->buffer && buffer->buffer->n_datas && buffer->buffer->datas)
     {
@@ -186,6 +193,25 @@ static const struct pw_stream_events streamEvents = {
 };
 static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
 {
+  /* B7's per-frame allocation includes the page before FrameBuffer.data. */
+  this->frameHeaderSize = *alignSize;
+  /* B7 deinitializes capture whenever its last LGMP client disconnects, even
+   * immediately after initial setup. Keep the consent/session and chosen
+   * monitor alive across that idle transition; resume the SAME stream. */
+  if (this->stream)
+  {
+    pw_thread_loop_lock(this->loop);
+    this->stop = false;
+    int status = this->failed ? -EPIPE : pw_stream_set_active(this->stream, true);
+    pw_thread_loop_unlock(this->loop);
+    if (status < 0)
+    {
+      DEBUG_ERROR("Cannot resume the selected monitor: %s", strerror(-status));
+      return false;
+    }
+    DEBUG_INFO("Resuming the existing monitor session (no new chooser)");
+    return true;
+  }
   const char * stage = "opening the desktop portal";
   this->stop = this->failed = this->hasFormat = this->connected = false;
   this->warnedBuffer = false;
@@ -246,7 +272,8 @@ static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
   pw_core_add_listener(this->core, &this->coreListener, &coreEvents, NULL);
   stage = "creating the PipeWire capture stream";
   this->stream = pw_stream_new(this->core, "Looking Glass Linux Guest",
-    pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY,
+    pw_properties_new(PW_KEY_NODE_NAME, "looking-glass-capture",
+      PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY,
       "Capture", PW_KEY_MEDIA_ROLE, "Screen", NULL));
   if (!this->stream)
   {
@@ -284,7 +311,7 @@ failLocked:
 fail:
   DEBUG_ERROR("PipeWire capture initialization failed during %s", stage);
   DEBUG_INFO("For a removed/wrong monitor, run bash run-guest.sh --choose-display from an accessible guest desktop");
-  pipewire_deinit();
+  pipewire_shutdown();
   return false;
 }
 static void pipewire_stop(void)
@@ -293,11 +320,18 @@ static void pipewire_stop(void)
     return;
   pw_thread_loop_lock(this->loop);
   this->stop = true;
+  if (this->stream && pw_stream_set_active(this->stream, false) < 0)
+    this->failed = true;
   discardPending();
   pw_thread_loop_signal(this->loop, false);
   pw_thread_loop_unlock(this->loop);
 }
 static bool pipewire_deinit(void)
+{
+  pipewire_stop();
+  return true;
+}
+static bool pipewire_shutdown(void)
 {
   pipewire_stop();
   /* Stop outside the lock; no callbacks can run after stop returns. */
@@ -323,7 +357,7 @@ static bool pipewire_deinit(void)
 }
 static void pipewire_free(void)
 {
-  pipewire_deinit();
+  pipewire_shutdown();
   free(this->snapshot);
   free(this);
   this = NULL;
@@ -379,9 +413,13 @@ static CaptureResult copyBuffer(struct spa_buffer * buffer)
     return rejectBuffer("unmapped, unsupported or out-of-bounds layout", data);
   if (layout.packedSize > this->capacity)
   {
-    uint8_t * memory = realloc(this->snapshot, layout.packedSize);
-    if (!memory)
+    /* B7 framebuffer_write uses aligned SSE/AVX2 streaming loads. malloc /
+     * realloc promise only 16-byte alignment on x86-64; large allocations
+     * commonly land at page+16 and fault on the first 32-byte AVX2 load. */
+    void * memory = NULL;
+    if (posix_memalign(&memory, 32, layout.packedSize) != 0)
       return CAPTURE_RESULT_ERROR;
+    free(this->snapshot);
     this->snapshot = memory;
     this->capacity = layout.packedSize;
   }
@@ -430,10 +468,13 @@ static CaptureResult pipewire_waitFrame(unsigned index, CaptureFrame * frame,
   const size_t maxFrameSize)
 {
   const size_t pitch = (size_t)this->readyWidth * 4;
-  if (!pitch || !this->readyHeight || maxFrameSize < pitch)
+  if (maxFrameSize < this->frameHeaderSize)
     return CAPTURE_RESULT_ERROR;
-  this->dataHeight = maxFrameSize / pitch < this->readyHeight ?
-    maxFrameSize / pitch : this->readyHeight;
+  const size_t payload = maxFrameSize - this->frameHeaderSize;
+  if (!pitch || !this->readyHeight || payload < pitch)
+    return CAPTURE_RESULT_ERROR;
+  this->dataHeight = payload / pitch < this->readyHeight ?
+    payload / pitch : this->readyHeight;
   *frame = (CaptureFrame){
     .formatVer = this->readyVersion,
     .screenWidth = this->readyWidth, .screenHeight = this->readyHeight,
@@ -450,7 +491,8 @@ static CaptureResult pipewire_getFrame(unsigned index, FrameBuffer * frame,
   const size_t maxFrameSize)
 {
   const size_t size = (size_t)this->readyWidth * 4 * this->dataHeight;
-  if (size > maxFrameSize || !this->snapshot)
+  if (maxFrameSize < this->frameHeaderSize ||
+      size > maxFrameSize - this->frameHeaderSize || !this->snapshot)
     return CAPTURE_RESULT_ERROR;
   if (!framebuffer_write(frame, this->snapshot, size))
     return CAPTURE_RESULT_ERROR;

@@ -8,13 +8,15 @@ jobs:
       - run: pacman -Syu --noconfirm git cmake ninja pkgconf pipewire glib2 dbus desktop-file-utils systemd
       - uses: actions/checkout@v4
       - run: bash build.sh
+      - run: bash tests/pipewire-lgmp.sh
   debian:
     runs-on: ubuntu-latest
     container: debian:bookworm
     steps:
-      - run: apt-get update && apt-get install -y git ca-certificates build-essential cmake ninja-build pkg-config libpipewire-0.3-dev libglib2.0-dev libglib2.0-bin dbus-daemon desktop-file-utils systemd
+      - run: apt-get update && apt-get install -y git ca-certificates build-essential cmake ninja-build pkg-config pipewire-bin libpipewire-0.3-dev libglib2.0-dev libglib2.0-bin dbus-daemon desktop-file-utils systemd
       - uses: actions/checkout@v4
       - run: bash build.sh
+      - run: bash tests/pipewire-lgmp.sh
   ivshmem-qemu:
     runs-on: ubuntu-latest
     container: debian:bookworm

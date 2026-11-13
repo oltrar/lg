@@ -153,7 +153,22 @@ bool portal_createScreenCastSession(struct Portal * p, char ** handle)
   GVariantBuilder options;
   g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
   g_autoptr(GVariant) result = request(p, "CreateSession", NULL, &options);
-  return result && g_variant_lookup(result, "session_handle", "o", handle);
+  if (!result)
+    return false;
+  /* The portal spec intentionally returns this object path as a STRING ('s'),
+   * not an object-path variant ('o'), for historical compatibility. */
+  if (!g_variant_lookup(result, "session_handle", "s", handle))
+  {
+    DEBUG_ERROR("Portal CreateSession response lacks string session_handle");
+    return false;
+  }
+  if (!g_variant_is_object_path(*handle))
+  {
+    DEBUG_ERROR("Portal CreateSession returned an invalid session object path");
+    g_clear_pointer(handle, g_free);
+    return false;
+  }
+  return true;
 }
 void portal_destroySession(struct Portal * p, char ** handle)
 {

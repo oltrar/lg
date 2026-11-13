@@ -1,5 +1,20 @@
 # Validation record
 
+## Portal session startup fix — 2026-11-13
+
+Fixed the ScreenCast `CreateSession` parser: the documented `session_handle`
+result is a string (`s`), not an object-path variant (`o`). The parser validates
+the string as an object path before using it in later calls. Added named
+capture-startup stages and concrete PipeWire allocation/connect errors.
+
+The regression test uses the actual portal client against a private D-Bus
+service: a standards-compliant string response, SelectSources/Start, Unix FD
+transfer, session close, cancellation, and missing/invalid result values.
+Build-upgrade tests cover managed source updates, migration from prior Git
+overlay versions, and refusal to overwrite local edits. See the fix PR's checks
+for native results; this still does not establish real desktop capture on
+the user's NVIDIA/KDE/GNOME setup.
+
 ## Plain IVSHMEM update — 2026-11-13
 
 This update changes the preferred guest path to direct PCI IVSHMEM BAR2,

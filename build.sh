@@ -20,21 +20,7 @@ fi
 # B7's configure-time checks require all pinned submodules even for host-only builds.
 git -C "$SRC" submodule update --init --recursive
 
-# Preserve edits that are neither the pinned upstream nor this overlay.
-while IFS= read -r -d '' overlay; do
-  relative=${overlay#"$ROOT/overlay/"}
-  destination="$SRC/$relative"
-  if [[ -e "$destination" ]] && ! cmp -s "$overlay" "$destination"; then
-    expected=$(git -C "$SRC" rev-parse --verify "HEAD:$relative" 2>/dev/null || true)
-    actual=$(git -C "$SRC" hash-object --no-filters "$destination")
-    [[ -n "$expected" && "$actual" == "$expected" ]] || {
-      printf 'Preserving modified file: %s\nUse a separate project copy for a clean build.\n' "$destination" >&2
-      exit 1
-    }
-  fi
-  mkdir -p -- "$(dirname -- "$destination")"
-  cp -- "$overlay" "$destination"
-done < <(find "$ROOT/overlay" -type f -print0)
+bash "$ROOT/scripts/apply-overlay.sh" "$ROOT" "$SRC"
 
 LG_WITH_BACKEND_TEST=1 bash "$ROOT/test.sh"
 cmake -S "$SRC/host" -B "$ROOT/_build/host" -G Ninja \

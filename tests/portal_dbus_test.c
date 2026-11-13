@@ -103,7 +103,8 @@ static void method(GDBusConnection * conn, const char * sender, const char * pat
   GVariantBuilder results;
   g_variant_builder_init(&results, G_VARIANT_TYPE_VARDICT);
   int responseMode = g_atomic_int_get(&server->mode);
-  if (create && responseMode == NORMAL)
+  if (create && (responseMode == NORMAL || responseMode == CANCEL_START ||
+                 responseMode == NO_STREAM))
     g_variant_builder_add(&results, "{sv}", "session_handle", g_variant_new_string(SESSION));
   else if (create && responseMode == WRONG_TYPE)
     g_variant_builder_add(&results, "{sv}", "session_handle", g_variant_new_uint32(42));

@@ -8,11 +8,11 @@ Wayland, and a Looking Glass **B7** client on the physical Linux host.
 implemented. See [limitations](#material-limitations) and
 [validation](VALIDATION.md) before using it.
 
-**Current hardware report:** the user still gets no NVIDIA-output feed after
-removing QXL, including after choosing the right monitor. The chooser alone
-did not resolve that failure. This revision fixes a separately reproduced
-BGRA negotiation bug and saves diagnostic reports automatically; the actual
-NVIDIA-only setup still needs verification. See
+**Current startup fix:** a reported journal warning showed that the generated
+service quoted `EnvironmentFile=` incorrectly and systemd ignored the saved
+options. This revision fixes that generator and adds `install.sh`, service
+repair, and build identification. Reinstalling a GPU/kernel driver is not
+required. The actual NVIDIA-only video failure still needs verification. See
 [QXL works but the NVIDIA feed does not](#qxl-works-but-the-nvidia-feed-does-not).
 
 ## 1. Guest dependencies — no KVMFR required
@@ -41,18 +41,70 @@ let its portal backend handle capture. Do not run the capture application as
 root or from a plain SSH login. Kernel headers and DKMS are only needed for the
 [optional KVMFR path](docs/optional-kvmfr.md), not the preferred IVSHMEM path.
 
-## 2. Build the guest program
+## 2. Get the code, build, and update it
 
 Clone this repository inside the guest (or extract the branch archive),
 then build from its root:
 
 ```bash
-git clone https://github.com/oltrar/lg.git
+git clone --branch main https://github.com/oltrar/lg.git
 cd lg
 bash build.sh
+bash version.sh
 ```
 
-When reviewing an unmerged PR, check out its branch before running `build.sh`.
+**Use `main` for normal installation and updates.** It contains merged PRs;
+you do not need to keep switching to their old feature branches. In particular,
+`fix-pipewire-negotiation` was the temporary branch for PR #6. Once that PR is
+merged, use `main` to receive later fixes too.
+
+On an **already-configured guest** with the dependencies and IVSHMEM permissions
+from this README, update from inside this repository directory:
+
+```bash
+git fetch origin
+git switch main
+git pull --ff-only origin main
+bash install.sh
+bash version.sh
+```
+
+Run `install.sh` as your normal user in KDE/GNOME Wayland, without sudo. Stop
+any separate manual capture first. It stops this project's managed service,
+builds the selected checkout and runs tests, records the executable's build,
+rewrites/validates the startup service for this exact project path, reloads
+systemd, and requests capture startup. It does not install dependencies, alter
+VM XML, configure GPU drivers, or replace the physical host's B7 client.
+If a build/validation step fails, it stops instead of claiming an installation
+succeeded. Complete first-time VM/device permission setup before using it.
+
+**An unmerged PR needs its own branch.** Only when testing a PR that has not
+merged, replace `BRANCH_NAME` below with the branch shown on that PR:
+
+```bash
+git fetch origin
+git switch BRANCH_NAME
+git pull --ff-only origin BRANCH_NAME
+bash install.sh
+```
+
+After it merges, return to the normal `main` update commands. If Git refuses
+because of local edits or divergent commits, preserve those changes before
+updating; do not delete your work or force-reset the checkout.
+
+`git switch` alone only changes source files. The executable and the installed
+startup unit are separate:
+
+| What you are running | How it is updated | How to inspect it |
+| --- | --- | --- |
+| Repository checkout | `git switch` and `git pull` | `bash version.sh` shows branch/commit |
+| Guest executable in `_build/host/` | `bash build.sh` or `bash install.sh` | Build commit, source fingerprint and binary hash |
+| Installed user service/autostart entry | `bash setup-startup.sh repair` or `bash install.sh` | Installed `ExecStart` and options path |
+
+`version.sh` also warns if the current capture sources or executable no longer
+match the recorded build, and shows the service's main executable when active.
+The capture reports include the checkout commit and build record. Keep the
+project at the same path; the service launches scripts from that directory.
 
 The script fetches upstream B7 commit
 `27fe47cbe2a3a8da986d310ab866f0b646ed68f5`, initializes its pinned submodules
@@ -69,6 +121,11 @@ record, it recognizes exact overlay versions in this repository's Git history.
 Unrecognized local source edits are preserved and stop the update. If you
 upgrade from downloaded archives without Git history and see that message,
 extract/build the new project in a separate directory instead of deleting edits.
+
+There is no project capture driver to reinstall for the default raw-IVSHMEM
+path. The privileged helper in step 4 only sets device permissions and installs
+a scoped udev rule. Leave working NVIDIA drivers and device passthrough intact
+when repairing the user application/service.
 
 ## 3. VM XML: plain IVSHMEM, input, sound and microphone
 
@@ -378,6 +435,9 @@ guest Wayland desktop**, as your normal user, **without sudo**:
 bash setup-startup.sh enable
 ```
 
+For a build/update plus startup installation in one command, use
+`bash install.sh` instead, after completing the dependency/IVSHMEM setup.
+
 Capture will start automatically at the next KDE/GNOME Wayland login, including
 after reboot. This installs a per-user XDG Autostart entry and a
 `looking-glass-host.service` **user** unit. The desktop entry imports the current
@@ -401,6 +461,23 @@ Autostart settings, so only one capture process starts. Keep this project at
 the same path; if you move it, run `bash setup-startup.sh enable` from its new
 location. Re-running enable updates the managed startup files and keeps settings.
 
+If the journal contains `EnvironmentFile= path is not absolute, ignoring:` with
+a quoted path, an older generated service is still installed. Switching Git
+branches or rebuilding does not rewrite that file. With this fixed checkout:
+
+```bash
+bash setup-startup.sh repair
+bash setup-startup.sh restart
+bash version.sh
+```
+
+Repair preserves your saved options and portal selection. A normal path now
+appears as `EnvironmentFile=/home/USER/.config/looking-glass-linux-wayland/autostart.env`
+without surrounding quotes. The generator validates a staged unit and refuses
+to install it if systemd prints warnings, even when it exits successfully.
+That warning proves the options were ignored; it does not by itself identify
+every reason capture might fail afterward. Check the new capture log as well.
+
 Optional startup settings are saved in
 `${XDG_CONFIG_HOME:-$HOME/.config}/looking-glass-linux-wayland/autostart.env`:
 
@@ -423,14 +500,20 @@ Stop until the next login, or remove startup entirely:
 
 ```bash
 bash setup-startup.sh stop
-bash setup-startup.sh disable
+bash setup-startup.sh uninstall
 ```
 
-Disable stops the service and removes its managed desktop entry/unit, keeping
+`uninstall` is an alias for `disable`. It stops the service and removes its managed desktop entry/unit, keeping
 your settings and portal restore tokens. Use `status` and the journal command
 above to inspect failures. To switch back to manual capture, stop the service
 first. The service does not automatically retry on failure or portal cancellation,
 so it will not repeatedly open permission prompts; use `restart` when ready.
+
+This uninstalls **startup registration**, not NVIDIA/KVMFR drivers, the repository,
+the compiled executable, or saved reports. To reinstall startup, run
+`bash install.sh` or `bash setup-startup.sh enable`. No driver uninstall is
+needed for the `EnvironmentFile` bug. Removing the optional persistent IVSHMEM
+permission helper is described separately at the end of step 4.
 
 Startup uses the same saved per-desktop portal permission as manual capture.
 KDE/GNOME may still show a monitor chooser after login if permission cannot be

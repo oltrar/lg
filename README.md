@@ -8,34 +8,31 @@ Wayland, and a Looking Glass **B7** client on the physical Linux host.
 implemented. See [limitations](#material-limitations) and
 [validation](VALIDATION.md) before using it.
 
-## 1. Guest dependencies
+## 1. Guest dependencies — no KVMFR required
 
-Use an up-to-date CachyOS guest. In its KDE Wayland session:
+The preferred video transport is **plain IVSHMEM**, using the VM XML in step 3.
+The Linux guest maps the PCI device's BAR2 directly through sysfs; the physical
+host's existing B7 client reads the corresponding `/dev/shm/looking-glass` file.
+Neither side needs KVMFR for this path. Keyboard/mouse, guest playback and host
+microphone capture use B7's existing SPICE channels; SPICE video is disabled.
+
+Inside an up-to-date CachyOS/Arch **KDE Wayland guest**:
 
 ```bash
 sudo pacman -S --needed base-devel git cmake ninja pkgconf pipewire glib2 \
-  xdg-desktop-portal xdg-desktop-portal-kde dkms pciutils
+  xdg-desktop-portal xdg-desktop-portal-kde pciutils
 ```
 
-For a GNOME guest/session, use `xdg-desktop-portal-gnome` as well:
+For a GNOME guest/session also install:
 
 ```bash
 sudo pacman -S --needed xdg-desktop-portal-gnome
 ```
 
-Both backend packages may coexist when both desktops are installed. The active
-desktop should select its own backend. Avoid forcing a KDE-only portal backend
-globally for GNOME. Log into the intended desktop normally; do not launch the
-guest capture program with `sudo` or from a plain SSH session.
-
-Install headers matching **the exact running guest kernel**. For the standard
-CachyOS kernel this is usually `linux-cachyos-headers`; LTS and other variants
-need their matching header package. Check:
-
-```bash
-uname -r
-ls -ld /usr/lib/modules/"$(uname -r)"/build
-```
+Both portal backends may coexist. Log into the intended desktop normally and
+let its portal backend handle capture. Do not run the capture application as
+root or from a plain SSH login. Kernel headers and DKMS are only needed for the
+[optional KVMFR path](docs/optional-kvmfr.md), not the preferred IVSHMEM path.
 
 ## 2. Build the guest program
 
@@ -58,144 +55,205 @@ your client, install system files or change the VM configuration.
 
 Binary: `_build/host/looking-glass-host`.
 
-## 3. Give the Linux VM its own IVSHMEM allocation
+## 3. VM XML: plain IVSHMEM, input, sound and microphone
 
-On the **physical Linux host**, shut down the Linux VM and merge
-`config/libvirt-devices.xml` into its existing libvirt definition. It is a
-snippet, not a full VM definition. Replace matching existing graphics/audio/
-video elements; do not paste duplicate ones.
-
-The example uses:
-
-- Shared memory: `/dev/shm/looking-glass-linux`, 128 MiB, suitable as an initial
-  4K SDR allocation. Higher maximum dimensions can need more memory.
-- SPICE input/audio listener: **127.0.0.1:5901**.
-- Existing NVIDIA VFIO passthrough stays in the domain.
-
-Use a different memory allocation and SPICE port from your Windows VM. Two
-running VMs must never write to the same Looking Glass shared-memory region.
-
-For initial setup, retain a way to log into and operate the guest's portal
-chooser, such as a physical display on the NVIDIA GPU or a temporary console.
-Choose the display rendered by that GPU, not an emulated console display.
-After first capture is verified, use the snippet's final:
+On the **physical Linux host**, shut down the Linux VM and use this exact
+shared-memory device inside `<devices>`:
 
 ```xml
-<video><model type='none'/></video>
+<shmem name='looking-glass'>
+  <model type='ivshmem-plain'/>
+  <size unit='M'>64</size>
+</shmem>
 ```
 
-This removes the emulated display and prevents SPICE video fallback. Make that
-change with the VM shut down. Future screen-sharing prompts may still need
-interaction inside the guest; an unattended login-screen workflow is not
-implemented here.
+Libvirt exposes its backing file on the physical host as
+`/dev/shm/looking-glass`. Inside the guest it is a PCI device (`1af4:1110`),
+not a `/dev/shm` file. The guest app now discovers and maps this device directly.
 
-Libvirt creates the host-side memory file after VM startup. Give the physical
-host user running the client read/write access through your normal Looking
-Glass permissions setup, using the new filename. A temporary ACL after the
-file exists preserves QEMU's existing ownership:
+Merge [config/libvirt-devices.xml](config/libvirt-devices.xml) into your existing
+definition, replacing matching elements. It includes SPICE on **127.0.0.1:5901**,
+an ICH9 sound card explicitly linked to the SPICE audio backend, and the final
+`<video><model type='none'/></video>` configuration. This allows keyboard/mouse,
+playback and microphone capture without a SPICE display feed. Existing NVIDIA
+VFIO passthrough stays in the definition.
+
+**64 MiB is supported**, with the unchanged B7 raw-frame protocol. It is suitable
+for an initial 1080p/1440p SDR setup. For a full 4K SDR frame, use **128 MiB**:
+B7 keeps two frame buffers plus protocol/cursor metadata, so a 64 MiB region
+cannot reliably hold full 4K frames. Refresh-rate changes alone do not increase
+the number of frame buffers. The client can display truncated frames if you
+exceed capacity; increase the region before using a larger output.
+
+If your Windows VM also uses `name='looking-glass'`, do not run both VMs with the
+same backing file. Either run them separately or rename one allocation (for
+example `looking-glass-linux`) and update only that VM's client `shmFile` path.
+The guest discovers by PCI ID/address, not by the libvirt shmem name. Use distinct
+SPICE ports for concurrently running VMs as well.
+
+Keep a way to operate the first guest screen-sharing chooser, such as a physical
+display on the NVIDIA GPU or a temporary console. Choose the NVIDIA-driven
+monitor. After capture is verified, shut down the VM and remove its emulated
+video device to prevent SPICE video fallback. Future portal prompts may still
+need interaction in the guest; login-screen capture is not implemented.
+
+After VM startup, grant the physical host user access to the existing backing
+file using your usual Looking Glass permission setup. A temporary ACL preserves
+QEMU's ownership:
 
 ```bash
-sudo setfacl -m u:"$USER":rw /dev/shm/looking-glass-linux
+sudo setfacl -m u:"$USER":rw /dev/shm/looking-glass
 ```
 
-This command runs on the **physical host**, and may need repeating if libvirt
-recreates the file. Its persistent equivalent depends on your existing
-QEMU/libvirt permissions configuration. Do not make it world-writable.
+This command runs on the **physical host**, not in the guest. It may need
+repeating if libvirt recreates the file. Do not make the file world-writable.
 
-## 4. Guest KVMFR driver
+## 4. Guest IVSHMEM permissions — no kernel module
 
-Inside the **Linux guest**, after step 2 and with the IVSHMEM PCI device present:
+Inside the Linux guest, check that the XML created the device:
 
 ```bash
 lspci -nn | grep '1af4:1110'
-(
-  cd _upstream/LookingGlass/module
-  sudo dkms install .
-)
-sudo install -Dm644 config/70-kvmfr.rules /etc/udev/rules.d/70-kvmfr.rules
-sudo install -Dm644 config/kvmfr-guest.conf /etc/modules-load.d/kvmfr.conf
-sudo udevadm control --reload-rules
-sudo modprobe kvmfr
-sudo udevadm trigger --subsystem-match=kvmfr
-ls -l /dev/kvmfr*
 ```
 
-If DKMS reports an existing `kvmfr/0.0.12` installation, inspect that existing
-installation before changing it. This project does not overwrite a different
-DKMS source with the same version. If the kernel rejects the module, inspect
-`dmesg`; signing may be required by the guest's Secure Boot configuration.
+Run the scoped setup helper once with privilege, using your guest desktop user:
 
-**In the guest, load `kvmfr` without `static_size_mb`.** It must bind to the
-PCI IVSHMEM device supplied by QEMU. A static allocation inside the guest
-creates unrelated RAM, not the shared region the physical host sees. If you
-already configured static devices there, correct that configuration and
-reboot before continuing. Guest and physical host `/dev/kvmfr0` names refer to
-different devices and their indices need not match.
+```bash
+sudo bash setup-ivshmem.sh --user "$USER" --install
+```
 
-The active graphical session should obtain access via the included `uaccess`
-rule. Check `test -r /dev/kvmfr0 && test -w /dev/kvmfr0`. Use `bash doctor.sh`
-if it fails. Do not run the capture application as root to bypass this.
+It verifies the IVSHMEM vendor/device IDs, enables that device if needed, and
+grants only this account access to **BAR2**. `--install` adds a root-owned helper
+and a udev rule for the selected PCI address so the permission survives reboot.
+Without `--install`, the change lasts until the sysfs device is recreated.
+The capture application itself continues to run without root or capabilities.
 
-## 5. Start capture and your existing B7 client
+If there are multiple IVSHMEM devices, select the guest's address explicitly:
 
-Inside a terminal in the **guest KDE or GNOME Wayland desktop**:
+```bash
+sudo bash setup-ivshmem.sh --user "$USER" --device 0000:06:01.0 --install
+```
+
+Use the address reported by `lspci`, not the example address. The helper refuses
+non-IVSHMEM devices and devices already bound to a driver. It never unbinds a
+GPU or a driver automatically. If you previously installed guest KVMFR, you can
+keep using it explicitly, or unbind **only the IVSHMEM device** before switching
+to raw mapping. Do not alter the NVIDIA device's binding.
+
+If the guest kernel's lockdown policy prohibits PCI resource mappings, this
+method can be denied despite file permissions. The program reports the mapping
+error; it does not bypass the policy or silently switch transports. See
+[optional KVMFR](docs/optional-kvmfr.md) if that environment requires a driver.
+
+To remove persistent raw-device setup, delete
+`/etc/udev/rules.d/70-lg-ivshmem.rules` and
+`/usr/local/libexec/lg-ivshmem-permissions`, reload udev rules, and reboot. Re-run
+setup if the IVSHMEM PCI address changes after editing the domain.
+
+## 5. Capture, keyboard/mouse, playback and shared microphone
+
+In a terminal in the **guest KDE/GNOME Wayland desktop**, as your normal user:
 
 ```bash
 bash run-guest.sh
 ```
 
-Accept the screen-sharing prompt and select the NVIDIA-driven monitor.
-For a different guest KVMFR device or requested rate:
+The default is `LG_SHM=ivshmem`: discover exactly one IVSHMEM PCI device, validate
+its BAR2 and map it. With multiple devices, select one explicitly:
 
 ```bash
-LG_SHM=/dev/kvmfr1 LG_FPS=120 bash run-guest.sh
+LG_SHM=ivshmem:0000:06:01.0 LG_FPS=120 bash run-guest.sh
 ```
 
-Inside the **physical Linux host**:
+An ambiguous or inaccessible device produces a clear error, not a KVMFR
+fallback. Accept the portal chooser and select the monitor on the NVIDIA GPU.
+
+On the **physical Linux host**, copy the supplied client INI there, adjust its
+SPICE port if needed, and run your existing B7 client:
 
 ```bash
 looking-glass-client -C /absolute/path/to/config/client-linux.ini
 ```
 
-Copy the supplied client INI there first, and adjust its shared-memory path
-and SPICE port if you changed them. Keep it separate from your Windows-VM
-client configuration. Use B7; do not substitute B8's Windows IDD workflow.
-The sample captures input on startup. B7's default capture/release key is
-Scroll Lock; verify your own client key configuration first. Relative mouse
-input continues to work on Wayland through QEMU's guest input devices, without
-a compositor-specific input-injection backend. Adjust guest acceleration in
-desktop settings if needed.
+The INI reads `/dev/shm/looking-glass`, enables SPICE input/audio, captures input
+on startup, and enables microphone capture when a guest application requests it:
 
-For audio, select the emulated ICH9/Intel HDA sound card in the guest. NVIDIA
-HDMI audio is a different device and is not automatically carried by SPICE.
+```ini
+[audio]
+micDefault=allow
+micShowIndicator=yes
+syncVolume=no
+```
 
-Stop guest capture with Ctrl+C. For optional autostart, add `run-guest.sh` in
-KDE's Autostart settings, or add a GNOME desktop autostart entry that runs the
-script with `/usr/bin/bash`. Keep the project at the same path. A restored
-portal selection is subject to desktop permission policy. This is deliberately
-a graphical-session program, not a system service capturing the login screen.
+**The physical host microphone stays attached to the host.** Use its PipeWire
+audio server to feed Looking Glass and host applications concurrently. Do not
+USB/PCI-pass through the microphone or open its ALSA hardware device exclusively.
+B7's PipeWire recording stream is non-exclusive; it does not take the microphone
+away from other PipeWire/PulseAudio clients. The included config allows guest
+microphone requests automatically and keeps B7's recording indicator enabled.
+Use `micDefault=prompt` instead if you prefer approval for each request.
+
+Verify the physical host client log reports **`Using AudioDev: PipeWire`**.
+B7's PulseAudio backend implements playback but not microphone recording. If
+your client lacks PipeWire support, rebuild B7 with its PipeWire audio backend
+enabled; this does not change the B7 protocol or require KVMFR.
+
+By default B7 uses the host's default PipeWire input source. To choose another
+microphone, set the **host client** option below to its PipeWire `node.name`
+(obtain it with `wpctl status` and `wpctl inspect NODE_ID`):
+
+```ini
+[pipewire]
+recDevice=alsa_input.YOUR_MICROPHONE_NODE
+```
+
+Inside the guest select the **ICH9/Intel HDA** card for both output and input,
+and select its input in the guest application that needs the microphone.
+NVIDIA HDMI audio is a separate device and is not automatically carried by
+SPICE. The SPICE listener must be on the physical host, and `spice:audio=yes`
+must remain enabled. Do not start the B7 client with `-s`, which disables SPICE.
+
+B7's default input capture/release key is Scroll Lock. Scroll Lock+E toggles
+microphone recording; check your own escape-key customization. Captured relative
+input uses QEMU's virtual input devices and works independently of the guest's
+Wayland input-injection APIs. Adjust guest mouse acceleration if needed.
+
+Stop capture with Ctrl+C. For autostart, add `run-guest.sh` to the guest desktop's
+Autostart settings with `/usr/bin/bash`. Portal restoration remains subject to
+desktop policy. Keep the project in the same path, and run it within the
+graphical user session rather than as a root/system capture service.
 
 ## 6. Verify the actual VM
 
-Perform each check under **both KDE and GNOME**, using a fresh login to each:
+Under **both KDE and GNOME**, using a fresh login to each:
 
-1. With emulated video disabled, capture starts and the B7 log reports frames
-   and `OS: Linux`. Without IVSHMEM capture there should be no SPICE picture.
-2. Type, click, drag, scroll, and capture/release input. Check the embedded
-   cursor and any desktop shortcuts important to you.
-3. Resize/change the guest display resolution within allocated memory limits;
-   verify a clean image and correct colors. Test scaling separately.
-4. Play guest audio through the emulated sound card.
-5. Stop/start the client and capture program. Verify portal selection restore,
-   refusal/cancellation, lock/unlock, and logout behavior.
-6. Measure your desired resolution and refresh rate in B7's statistics, while
-   observing guest CPU usage. A configured 120 fps is a request, not a result.
-7. Verify that Windows and Linux VMs can run with independent memory regions,
-   ports and client configurations.
+1. Check raw mapping works without a loaded `kvmfr` module and the guest log
+   reports `PCI IVSHMEM BAR2` with **64 MiB**. The client should report Linux
+   guest frames. With emulated video removed, no SPICE picture should appear
+   if the guest capture application is stopped.
+2. Type, click, drag and scroll. Capture/release input and check the embedded
+   cursor and your important shortcuts.
+3. Test your output resolution and scaling. Increase shared memory to 128 MiB
+   before full 4K SDR capture. Measure actual cadence and CPU usage; requested
+   FPS is not a performance guarantee.
+4. Play sound in the guest using its emulated sound card.
+5. Open a guest recorder and a **physical-host recorder at the same time**,
+   using the same host PipeWire microphone. Verify both receive your voice,
+   then close either application and verify the other still records. Check
+   the B7 microphone indicator and the guest application's selected input.
+6. Restart capture/client, cancel or revoke portal access, lock/unlock, and log
+   out. Verify per-desktop source restoration and clear failure handling.
+7. Keep allocations/ports separate if running Windows and Linux VMs together.
 
-For diagnostics, run `bash doctor.sh` in the guest. Capture stderr/stdout from
-`run-guest.sh` and `looking-glass-client` separately. Do not share restore-token
-files from `~/.config/looking-glass-linux-wayland/`.
+Run `bash doctor.sh` in the guest for read-only diagnostics. Keep guest and
+physical-host client logs separate, and do not share the portal restore tokens
+in `~/.config/looking-glass-linux-wayland/`.
+
+`bash test.sh` tests layout and PCI discovery. `bash build.sh` also tests real
+shared-memory mappings and backend publication. CI additionally boots a minimal
+QEMU guest and checks **unprivileged 64 MiB PCI BAR2 mapping and guest-to-host
+writes with no KVMFR driver**. This does not replace real NVIDIA/Wayland/audio
+testing in your VM. See [VALIDATION.md](VALIDATION.md).
 
 ## How it works
 
@@ -214,7 +272,8 @@ Patched looking-glass-host inside the guest
 Existing looking-glass-client B7 on the physical Linux host
 
 Keyboard / mouse: client -> QEMU SPICE input -> guest virtual input devices
-Audio: guest emulated sound card -> QEMU SPICE audio -> client
+Playback: guest sound card -> QEMU SPICE audio -> client -> host PipeWire
+Microphone: host PipeWire -> client -> QEMU SPICE record -> guest sound card
 ```
 
 There is no video codec or network video transport in the intended display
@@ -231,7 +290,7 @@ your VM. Read `VALIDATION.md` for the exact evidence and limits.
 
 ## What is implemented
 
-- B7-compatible guest frame publication using upstream LGMP and KVMFR code.
+- B7-compatible guest frame publication using upstream LGMP with raw PCI IVSHMEM preferred; KVMFR stays optional.
 - A Wayland-native capture path shared by KDE and GNOME portal backends.
 - Latest-frame selection, proper loop locking, producer-buffer ownership,
   padded source strides, chunk offsets and bounds checks.
@@ -261,13 +320,16 @@ your VM. Read `VALIDATION.md` for the exact evidence and limits.
   tokens can reduce later prompts when supported; they cannot bypass desktop
   policy. Changing desktop/session/output or revoking permission may prompt
   again. Locking/logging out may pause or end capture.
-- A guest kernel update can require a successful KVMFR rebuild. No claim is
-  made that B7's module builds against every current CachyOS kernel.
+- Raw PCI sysfs mapping depends on guest kernel policy and resource mapping
+  support. Its memory caching/performance can differ from KVMFR, and the host
+  client uses a CPU copy rather than KVMFR DMA-BUF import. No kernel module or
+  rebuild is required for the default raw path. The optional KVMFR path still
+  requires a module compatible with your guest kernel.
 
 ## Source, licensing and references
 
 This is an adaptation of the existing Linux host, not a clean-room replacement.
-The overlay is GPL-2.0-or-later, preserving upstream licensing. The complete
+The capture and PCI transport overlay is GPL-2.0-or-later, preserving upstream licensing. The complete
 base source is the pinned upstream commit fetched by `build.sh`; LGMP retains
 its upstream license. See `LICENSE` and `NOTICE.md`.
 
@@ -275,5 +337,7 @@ its upstream license. See `LICENSE` and `NOTICE.md`.
 - [Upstream Linux guest status](https://looking-glass.io/docs/B7/install_host/#for-linux)
 - [Upstream discussion of Linux capture and CPU copies](https://github.com/gnif/LookingGlass/issues/1265)
 - [ScreenCast portal API](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html)
+- [QEMU IVSHMEM](https://www.qemu.org/docs/master/system/devices/ivshmem.html)
+- [Linux PCI sysfs resource mapping](https://www.kernel.org/doc/html/latest/PCI/sysfs-pci.html)
 - [PipeWire threaded-loop locking](https://docs.pipewire.org/page_thread_loop.html)
 - [Arch portal backend configuration](https://wiki.archlinux.org/title/XDG_Desktop_Portal)

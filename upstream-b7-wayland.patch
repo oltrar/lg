@@ -1,3 +1,319 @@
+diff --git a/common/src/platform/linux/CMakeLists.txt b/common/src/platform/linux/CMakeLists.txt
+--- a/common/src/platform/linux/CMakeLists.txt
++++ b/common/src/platform/linux/CMakeLists.txt
+@@ -13,6 +13,7 @@
+   thread.c
+   event.c
+   ivshmem.c
++  ivshmem_pci.c
+   time.c
+   paths.c
+   open.c
+diff --git a/common/src/platform/linux/ivshmem.c b/common/src/platform/linux/ivshmem.c
+--- a/common/src/platform/linux/ivshmem.c
++++ b/common/src/platform/linux/ivshmem.c
+@@ -19,6 +19,7 @@
+  */
+ 
+ #include "common/ivshmem.h"
++#include "ivshmem_pci.h"
+ 
+ #include <dirent.h>
+ #include <fcntl.h>
+@@ -29,6 +30,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <errno.h>
++#include <limits.h>
+ 
+ #include "common/array.h"
+ #include "common/debug.h"
+@@ -46,6 +48,9 @@
+ 
+ static bool ivshmemDeviceValidator(struct Option * opt, const char ** error)
+ {
++  if (!strcmp(opt->value.x_string, "ivshmem") ||
++      !strncmp(opt->value.x_string, "ivshmem:", 8))
++    return true;
+   // if it's not a kvmfr device, it must be a file on disk
+   if (strlen(opt->value.x_string) > 3 && memcmp(opt->value.x_string, "kvmfr", 5) != 0)
+   {
+@@ -64,6 +69,7 @@
+ static StringList ivshmemDeviceGetValues(struct Option * option)
+ {
+   StringList sl = stringlist_new(true);
++  stringlist_push(sl, strdup("ivshmem"));
+ 
+   DIR * d = opendir("/sys/class/kvmfr");
+   if (!d)
+@@ -87,13 +93,10 @@
+ void ivshmemOptionsInit(void)
+ {
+   char * shmFile;
+-  struct stat st;
+-
+-  // if there is a kvmfr device, default to using it instead
+-  if (stat("/dev/kvmfr0", &st) == 0)
+-    shmFile = "/dev/kvmfr0";
+-  else
+-    shmFile = "/dev/shm/looking-glass";
++
++  // This project builds the Linux guest Host Application. Prefer direct PCI
++  // IVSHMEM; KVMFR and ordinary shared-memory files remain explicit choices.
++  shmFile = "ivshmem";
+ 
+   struct Option options[] =
+   {
+@@ -101,7 +104,7 @@
+       .module         = "app",
+       .name           = "shmFile",
+       .shortopt       = 'f',
+-      .description    = "The path to the shared memory file, or the name of the kvmfr device to use, e.g. kvmfr0",
++      .description    = "ivshmem (auto PCI BAR2), ivshmem:DOMAIN:BUS:SLOT.FUNCTION, /dev/kvmfrN, or a shared-memory file",
+       .type           = OPTION_TYPE_STRING,
+       .value.x_string = shmFile,
+       .validator      = ivshmemDeviceValidator,
+@@ -131,14 +134,30 @@
+   int devSize;
+   int devFd;
+   bool hasDMA;
++  struct LGPciMapping pci;
++  bool isPCI = !strcmp(shmDevice, "ivshmem") || !strncmp(shmDevice, "ivshmem:", 8);
+ 
+   dev->opaque = NULL;
+ 
+-  DEBUG_INFO("KVMFR Device     : %s", shmDevice);
++  DEBUG_INFO("Shared memory    : %s", shmDevice);
++
++  if (isPCI)
++  {
++    const char * address = shmDevice[7] == ':' ? shmDevice + 8 : NULL;
++    char error[256];
++    if ((address && !*address) ||
++        !lgPciResolve("/sys/bus/pci/devices", address, &pci, error, sizeof(error)))
++    {
++      DEBUG_ERROR("%s", address && !*address ? "An explicit IVSHMEM PCI address must not be empty" : error);
++      return false;
++    }
++    shmDevice = pci.path;
++    DEBUG_INFO("PCI IVSHMEM BAR2 : %s (%zu MiB)", shmDevice, pci.size / 1048576);
++  }
+ 
+   if (strlen(shmDevice) > 8 && memcmp(shmDevice, "/dev/kvmfr", 10) == 0)
+   {
+-    devFd = open(shmDevice, O_RDWR, (mode_t)0600);
++    devFd = open(shmDevice, O_RDWR | O_CLOEXEC, (mode_t)0600);
+     if (devFd < 0)
+     {
+       DEBUG_ERROR("Failed to open: %s", shmDevice);
+@@ -158,7 +177,7 @@
+   }
+   else
+   {
+-    devFd = open(shmDevice, O_RDWR, (mode_t)0600);
++    devFd = open(shmDevice, O_RDWR | O_CLOEXEC, (mode_t)0600);
+     if (devFd < 0)
+     {
+       DEBUG_ERROR("Failed to open: %s", shmDevice);
+@@ -175,7 +194,13 @@
+       return false;
+     }
+ 
+-    devSize = st.st_size;
++    if (!isPCI && (st.st_size <= 0 || st.st_size > INT_MAX))
++    {
++      DEBUG_ERROR("Invalid shared-memory file size");
++      close(devFd);
++      return false;
++    }
++    devSize = isPCI ? (int)pci.size : (int)st.st_size;
+     hasDMA  = false;
+   }
+ 
+@@ -184,11 +209,19 @@
+   {
+     DEBUG_ERROR("Failed to map the shared memory device: %s", shmDevice);
+     DEBUG_ERROR("%s", strerror(errno));
++    if (isPCI)
++      DEBUG_ERROR("Check guest PCI resource permissions and kernel lockdown policy; KVMFR is an optional alternative");
+     close(devFd);
+     return false;
+   }
+ 
+   struct IVSHMEMInfo * info = malloc(sizeof(*info));
++  if (!info)
++  {
++    munmap(map, devSize);
++    close(devFd);
++    return false;
++  }
+   info->size   = devSize;
+   info->devFd  = devFd;
+   info->hasDMA = hasDMA;
+diff --git a/common/src/platform/linux/ivshmem_pci.c b/common/src/platform/linux/ivshmem_pci.c
+new file mode 100644
+--- /dev/null
++++ b/common/src/platform/linux/ivshmem_pci.c
+@@ -0,0 +1,137 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++#include "ivshmem_pci.h"
++#include <ctype.h>
++#include <dirent.h>
++#include <errno.h>
++#include <inttypes.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++
++bool lgPciAddressValid(const char * address)
++{
++  if (!address || strlen(address) != 12)
++    return false;
++  for (unsigned i = 0; i < 12; ++i)
++  {
++    if (i == 4 || i == 7)
++    {
++      if (address[i] != ':') return false;
++    }
++    else if (i == 10)
++    {
++      if (address[i] != '.') return false;
++    }
++    else if (!isxdigit((unsigned char)address[i]))
++      return false;
++  }
++  return address[8] <= '1' && address[11] >= '0' && address[11] <= '7';
++}
++
++static bool readNumber(const char * root, const char * address,
++  const char * name, unsigned long * value)
++{
++  char path[PATH_MAX], text[64], * end;
++  if (snprintf(path, sizeof(path), "%s/%s/%s", root, address, name) >= sizeof(path))
++    return false;
++  FILE * file = fopen(path, "r");
++  if (!file) return false;
++  bool read = fgets(text, sizeof(text), file) != NULL;
++  fclose(file);
++  if (!read) return false;
++  errno = 0;
++  *value = strtoul(text, &end, 0);
++  if (errno || end == text) return false;
++  while (isspace((unsigned char)*end)) ++end;
++  return *end == '\0';
++}
++
++static bool matches(const char * root, const char * address)
++{
++  unsigned long vendor, device;
++  return lgPciAddressValid(address) &&
++    readNumber(root, address, "vendor", &vendor) && vendor == 0x1af4 &&
++    readNumber(root, address, "device", &device) && device == 0x1110;
++}
++
++bool lgPciResolve(const char * root, const char * address,
++  struct LGPciMapping * mapping, char * error, size_t errorSize)
++{
++  char selected[13] = {0}, path[PATH_MAX];
++  unsigned count = 0;
++  if (address && *address)
++  {
++    if (!matches(root, address))
++    {
++      snprintf(error, errorSize, "Expected an IVSHMEM PCI address (1af4:1110), e.g. ivshmem:0000:06:01.0");
++      return false;
++    }
++    memcpy(selected, address, sizeof(selected));
++  }
++  else
++  {
++    DIR * directory = opendir(root);
++    if (!directory)
++    {
++      snprintf(error, errorSize, "Cannot inspect PCI devices: %s", strerror(errno));
++      return false;
++    }
++    struct dirent * entry;
++    while ((entry = readdir(directory)))
++      if (matches(root, entry->d_name))
++      {
++        ++count;
++        memcpy(selected, entry->d_name, sizeof(selected));
++      }
++    closedir(directory);
++    if (count != 1)
++    {
++      snprintf(error, errorSize, count ?
++        "Multiple IVSHMEM devices: select one with ivshmem:DOMAIN:BUS:SLOT.FUNCTION" :
++        "No IVSHMEM PCI device (1af4:1110); add the shmem device to the VM XML");
++      return false;
++    }
++  }
++
++  unsigned long enabled;
++  if (!readNumber(root, selected, "enable", &enabled) || !enabled)
++  {
++    snprintf(error, errorSize, "IVSHMEM %s is not enabled; run setup-ivshmem.sh in the guest", selected);
++    return false;
++  }
++  if (snprintf(path, sizeof(path), "%s/%s/driver", root, selected) >= sizeof(path))
++    goto invalidResource;
++  struct stat st;
++  if (lstat(path, &st) == 0 || errno != ENOENT)
++  {
++    snprintf(error, errorSize, "IVSHMEM %s is bound to a driver; use its /dev/kvmfrN explicitly or unbind only this IVSHMEM device", selected);
++    return false;
++  }
++  if (snprintf(path, sizeof(path), "%s/%s/resource", root, selected) >= sizeof(path))
++    goto invalidResource;
++  FILE * file = fopen(path, "r");
++  if (!file) goto invalidResource;
++  uint64_t start = 0, end = 0, flags = 0;
++  char line[256];
++  bool valid = true;
++  for (unsigned bar = 0; bar <= 2; ++bar)
++    if (!fgets(line, sizeof(line), file) ||
++        sscanf(line, "%" SCNx64 " %" SCNx64 " %" SCNx64, &start, &end, &flags) != 3)
++    {
++      valid = false;
++      break;
++    }
++  fclose(file);
++  if (!valid || !(flags & 0x200) || !start || end < start ||
++      end - start >= INT_MAX || end - start + 1 < 4096)
++    goto invalidResource;
++  mapping->size = (size_t)(end - start + 1);
++  if (snprintf(mapping->path, sizeof(mapping->path), "%s/%s/resource2", root, selected) >= sizeof(mapping->path))
++    goto invalidResource;
++  return true;
++
++invalidResource:
++  snprintf(error, errorSize, "Invalid or inaccessible IVSHMEM BAR2 resource for %s", selected);
++  return false;
++}
+diff --git a/common/src/platform/linux/ivshmem_pci.h b/common/src/platform/linux/ivshmem_pci.h
+new file mode 100644
+--- /dev/null
++++ b/common/src/platform/linux/ivshmem_pci.h
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++#pragma once
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <limits.h>
++
++struct LGPciMapping
++{
++  char path[PATH_MAX];
++  size_t size;
++};
++
++bool lgPciAddressValid(const char * address);
++/* root is /sys/bus/pci/devices in production; tests supply a fixture tree. */
++bool lgPciResolve(const char * root, const char * address,
++  struct LGPciMapping * mapping, char * error, size_t errorSize);
 diff --git a/host/platform/Linux/capture/pipewire/src/frame_layout.h b/host/platform/Linux/capture/pipewire/src/frame_layout.h
 new file mode 100644
 --- /dev/null

@@ -1,5 +1,21 @@
 # Validation record
 
+## Plain IVSHMEM update — 2026-11-13
+
+This update changes the preferred guest path to direct PCI IVSHMEM BAR2,
+supports the supplied 64 MiB `ivshmem-plain` XML, keeps KVMFR optional, and adds
+microphone configuration/verification while preserving B7 compatibility.
+
+The new transport and test sources were cross-compiled to Linux objects with
+strict warnings. New native tests cover PCI selection/validation and real
+cross-process 64 MiB mappings. A QEMU smoke test boots a Linux guest without
+KVMFR and checks unprivileged PCI BAR2 mapping plus host/guest shared writes.
+Consult the feature PR checks for native test results. KDE/GNOME/NVIDIA capture,
+actual sound/input devices, microphone capture in both systems concurrently,
+and guest kernel lockdown configurations still require real-VM verification.
+
+The entries below describe the earlier B7 capture implementation's checks.
+
 Prepared 2026-11-10 for CachyOS/Arch guests, KDE Plasma and GNOME on Wayland,
 NVIDIA GPU passthrough, and an existing B7 client.
 

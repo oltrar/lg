@@ -3,7 +3,7 @@ https://github.com/gnif/LookingGlass
 
 Base revision: 27fe47cbe2a3a8da986d310ab866f0b646ed68f5 (B7).
 The overlay replaces the Linux PipeWire capture and desktop-portal source
-files and adds frame-layout helpers. Existing source copyright and GPL terms
+files, adds frame-layout helpers and a direct PCI IVSHMEM mapping path. Existing source copyright and GPL terms
 are retained. Added source, tests, scripts, examples and documentation are
 provided under GPL-2.0-or-later.
 

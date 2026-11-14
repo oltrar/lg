@@ -54,7 +54,7 @@ for boot in 1 2; do
   "$FIXTURE/kwin_wayland" --virtual --no-lockscreen --width 320 --height 240 --socket lg-test \
     > "$FIXTURE/kwin.log" 2>&1 & KWIN_PID=$!
   ready=0
-  for ((n=0;n<100;n++)); do
+  for ((n=0;n<600;n++)); do
     # wl_output globals are exposed before KWin starts its compositor. A stream
     # request in that interval is rejected as "Unsupported compositing type".
     # Wait for the actual renderer, as a desktop autostart normally would.

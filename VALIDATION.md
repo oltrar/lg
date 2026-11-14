@@ -44,8 +44,11 @@ KDE paths, with idle/reconnect handling, on native Arch and Debian CI. Those
 compositor/portal endpoints are fixtures. Additional real KWin software/virtual
 compositor validation across two starts is run separately; its final result is
 recorded on the PR. This test targets current Arch/KWin, matching CachyOS. Its
-GPU-less software renderer needs /dev/udmabuf, exposed only to the CI container;
-this is not used by our capture transport or required in a GPU-passthrough VM.
+GPU-less software renderer needs /dev/udmabuf. A disposable QEMU/TCG VM boots
+a stock Debian kernel and the current Arch container's filesystem for this
+test, because the hosted runner's Azure kernel omits that device. It has no
+network or physical GPU. This device is not used by our capture transport or
+required in a GPU-passthrough VM.
 The test waits for KWin's compositor to be active before requesting a stream.
 The older Debian KWin 5.27 virtual EGL backend omits outputChange emission, which
 its output screen-cast source requires, so it cannot validate pixel delivery

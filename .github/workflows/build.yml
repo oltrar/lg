@@ -5,25 +5,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Current KWin's GPU-less software renderer uses udmabuf. This device is
-      # only for the isolated compositor test, not the guest capture transport.
-      - name: Prepare software compositor device
+      # A known test kernel provides udmabuf for GPU-less KWin. Hosted Azure
+      # kernels omit it. No extra module is needed in the user's GPU VM.
+      - name: Prepare compositor test kernel
         run: |
-          if ! sudo modprobe udmabuf; then
-            sudo apt-get update
-            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
-            sudo modprobe udmabuf
-          fi
-          test -c /dev/udmabuf
+          docker run --rm -v "$GITHUB_WORKSPACE:/project" -w /project debian:bookworm bash -euc '
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends linux-image-amd64 busybox-static cpio gzip kmod
+            bash tests/kwin-vm-kernel.sh
+          '
       - name: Arch build, transport and real KWin capture
         run: |
-          docker run --rm --device /dev/udmabuf \
+          docker run --rm \
             -v "$GITHUB_WORKSPACE:/project" -w /project archlinux:base-devel bash -euc '
-              chmod 666 /dev/udmabuf
-              pacman -Syu --noconfirm git cmake ninja pkgconf pipewire glib2 dbus desktop-file-utils systemd wayland kwin mesa weston wireplumber
+              pacman -Syu --noconfirm git cmake ninja pkgconf pipewire glib2 dbus desktop-file-utils systemd wayland kwin mesa weston wireplumber qemu-system-x86
               bash build.sh
               bash tests/pipewire-lgmp.sh
-              bash tests/kwin-native.sh
+              bash tests/kwin-vm.sh
             '
   debian:
     runs-on: ubuntu-latest

@@ -43,8 +43,11 @@ Full PipeWire-to-B7 pixel verification also passes on both portal and native
 KDE paths, with idle/reconnect handling, on native Arch and Debian CI. Those
 compositor/portal endpoints are fixtures. Additional real KWin software/virtual
 compositor validation across two starts is run separately; its final result is
-recorded on the PR. This test targets current Arch/KWin, matching CachyOS. The
-older Debian KWin 5.27 virtual EGL backend omits outputChange emission, which
+recorded on the PR. This test targets current Arch/KWin, matching CachyOS. Its
+GPU-less software renderer needs /dev/udmabuf, exposed only to the CI container;
+this is not used by our capture transport or required in a GPU-passthrough VM.
+The test waits for KWin's compositor to be active before requesting a stream.
+The older Debian KWin 5.27 virtual EGL backend omits outputChange emission, which
 its output screen-cast source requires, so it cannot validate pixel delivery
 in that artificial environment. Debian still builds/runs the protocol/transport
 fixtures. This environment still has no NVIDIA passthrough VM or

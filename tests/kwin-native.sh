@@ -27,6 +27,7 @@ export HOME="$FIXTURE/home"
 export WAYLAND_DISPLAY=lg-test XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE
 export LIBGL_ALWAYS_SOFTWARE=1 KWIN_COMPOSE=O2
 export QT_LOGGING_RULES='kwin_screencast.debug=true'
+export QT_LOGGING_TO_CONSOLE=1
 unset KWIN_WAYLAND_NO_PERMISSION_CHECKS
 mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME/applications" "$XDG_CACHE_HOME" "$HOME"
 chmod 700 "$XDG_RUNTIME_DIR"
@@ -54,7 +55,12 @@ for boot in 1 2; do
     > "$FIXTURE/kwin.log" 2>&1 & KWIN_PID=$!
   ready=0
   for ((n=0;n<100;n++)); do
+    # wl_output globals are exposed before KWin starts its compositor. A stream
+    # request in that interval is rejected as "Unsupported compositing type".
+    # Wait for the actual renderer, as a desktop autostart normally would.
     if [[ -S $XDG_RUNTIME_DIR/lg-test ]] && \
+       [[ $(gdbus call --session --dest org.kde.KWin --object-path /Compositor \
+         --method org.freedesktop.DBus.Properties.Get org.kde.kwin.Compositing active 2>/dev/null) == '(<true>,)' ]] && \
        "$ROOT/_build/host/lg-kde-source" > "$FIXTURE/outputs" 2> "$FIXTURE/list.log"; then ready=1; break; fi
     sleep .1
   done

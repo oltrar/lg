@@ -23,6 +23,7 @@ lgStartReport() {
   printf 'Desktop: %s; session: %s; Wayland display: %s\n' \
     "${XDG_CURRENT_DESKTOP:-unset}" "${XDG_SESSION_TYPE:-unset}" "${WAYLAND_DISPLAY:-unset}"
   printf 'Capture settings: device=%s fps=%s restore=%s\n' "$DEVICE" "$FPS" "$RESTORE"
+  printf 'Native KDE connector: %s\n' "${KDE_OUTPUT:-portal}"
   printf 'Guest executable: %s\n' "$BINARY"
   printf 'Checkout commit: %s\n' "$(git -C "$root" rev-parse --verify HEAD 2>/dev/null || printf 'archive')"
   if [[ -f $root/_build/build-info.txt ]]; then

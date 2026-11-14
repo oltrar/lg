@@ -2,10 +2,10 @@
 set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$ROOT/versions.env"
-for tool in git cmake ninja pkg-config cc gio desktop-file-validate systemd-analyze; do
+for tool in git cmake ninja pkg-config cc gio desktop-file-validate systemd-analyze wayland-scanner; do
   command -v "$tool" >/dev/null || { printf 'Missing tool: %s\n' "$tool" >&2; exit 1; }
 done
-pkg-config --exists gio-2.0 gio-unix-2.0 libpipewire-0.3 libspa-0.2 || {
+pkg-config --exists gio-2.0 gio-unix-2.0 libpipewire-0.3 libspa-0.2 wayland-client wayland-server || {
   printf 'Install glib2 and pipewire development files; see README.md\n' >&2; exit 1;
 }
 SRC="$ROOT/_upstream/LookingGlass"
@@ -22,11 +22,11 @@ git -C "$SRC" submodule update --init --recursive
 
 bash "$ROOT/scripts/apply-overlay.sh" "$ROOT" "$SRC"
 
-LG_WITH_BACKEND_TEST=1 bash "$ROOT/test.sh"
 cmake -S "$SRC/host" -B "$ROOT/_build/host" -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -DUSE_XCB=OFF -DUSE_PIPEWIRE=ON -DENABLE_BACKTRACE=OFF
 cmake --build "$ROOT/_build/host" --parallel
+LG_WITH_BACKEND_TEST=1 bash "$ROOT/test.sh"
 "${CC:-cc}" -std=gnu11 -D_GNU_SOURCE -Wall -Werror -O2 \
   -ffunction-sections -fdata-sections -Wl,--gc-sections \
   -I "$SRC/common/include" -I "$SRC" -I "$SRC/repos/LGMP/lgmp/include" \

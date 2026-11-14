@@ -3,17 +3,31 @@ on: [push, pull_request, workflow_dispatch]
 jobs:
   arch:
     runs-on: ubuntu-latest
-    container: archlinux:base-devel
     steps:
-      - run: pacman -Syu --noconfirm git cmake ninja pkgconf pipewire glib2 dbus desktop-file-utils systemd
       - uses: actions/checkout@v4
-      - run: bash build.sh
-      - run: bash tests/pipewire-lgmp.sh
+      # A known test kernel provides udmabuf for GPU-less KWin. Hosted Azure
+      # kernels omit it. No extra module is needed in the user's GPU VM.
+      - name: Prepare compositor test kernel
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/project" -w /project debian:trixie bash -euc '
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends linux-image-amd64 busybox-static cpio gzip kmod
+            bash tests/kwin-vm-kernel.sh
+          '
+      - name: Arch build, transport and real KWin capture
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/project" -w /project archlinux:base-devel bash -euc '
+              pacman -Syu --noconfirm git cmake ninja pkgconf pipewire glib2 dbus desktop-file-utils systemd wayland kwin mesa weston wireplumber qemu-system-x86
+              bash build.sh
+              bash tests/pipewire-lgmp.sh
+              bash tests/kwin-vm.sh
+            '
   debian:
     runs-on: ubuntu-latest
     container: debian:bookworm
     steps:
-      - run: apt-get update && apt-get install -y git ca-certificates build-essential cmake ninja-build pkg-config pipewire-bin libpipewire-0.3-dev libglib2.0-dev libglib2.0-bin dbus-daemon desktop-file-utils systemd
+      - run: apt-get update && apt-get install -y git ca-certificates build-essential cmake ninja-build pkg-config pipewire-bin libpipewire-0.3-dev libglib2.0-dev libglib2.0-bin dbus-daemon desktop-file-utils systemd libwayland-dev libwayland-bin
       - uses: actions/checkout@v4
       - run: bash build.sh
       - run: bash tests/pipewire-lgmp.sh
@@ -21,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     container: debian:bookworm
     steps:
-      - run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates build-essential cmake ninja-build pkg-config libpipewire-0.3-dev libglib2.0-dev libglib2.0-bin dbus-daemon desktop-file-utils systemd qemu-system-x86 busybox-static cpio gzip linux-image-amd64
+      - run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates build-essential cmake ninja-build pkg-config libpipewire-0.3-dev libglib2.0-dev libglib2.0-bin dbus-daemon desktop-file-utils systemd libwayland-dev libwayland-bin qemu-system-x86 busybox-static cpio gzip linux-image-amd64
       - uses: actions/checkout@v4
       - run: bash build.sh
       - run: bash tests/qemu-ivshmem.sh

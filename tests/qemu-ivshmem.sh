@@ -30,6 +30,10 @@ for d in /sys/bus/pci/devices/*; do
   [ "$(cat "$d/enable")" != 0 ] || echo 1 > "$d/enable"
   chown 1000:1000 "$d/resource2"
   chmod 600 "$d/resource2"
+  if [ -f "$d/resource2_wc" ]; then
+    chown 1000:1000 "$d/resource2_wc"
+    chmod 600 "$d/resource2_wc"
+  fi
 done
 if [ -d /sys/module/kvmfr ]; then
   echo 'FAIL: KVMFR unexpectedly loaded'

@@ -17,10 +17,12 @@ export PATH="$FIXTURE/bin:$PATH"
 DEVICE="$FIXTURE/pci/0000:09:02.0"
 printf '0x1af4\n' > "$DEVICE/vendor"; printf '0x1110\n' > "$DEVICE/device"
 printf '0\n' > "$DEVICE/enable"; : > "$DEVICE/resource2"
+: > "$DEVICE/resource2_wc"
 bash "$FIXTURE/setup.sh" --user nobody --install
 ! grep -q 'KERNEL==' "$FIXTURE/rule"
 [[ $(stat -c %a "$DEVICE/resource2") == 600 && $(stat -c %u "$DEVICE/resource2") == "$(id -u nobody)" ]]
 [[ $(<"$DEVICE/enable") == 1 ]]
+[[ $(stat -c %a "$DEVICE/resource2_wc") == 600 && $(stat -c %u "$DEVICE/resource2_wc") == "$(id -u nobody)" ]]
 # QXL removal reassigns the bus; the installed helper must discover the new BDF.
 mv -- "$DEVICE" "$FIXTURE/pci/0000:08:01.0"
 DEVICE="$FIXTURE/pci/0000:08:01.0"

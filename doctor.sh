@@ -35,6 +35,7 @@ for device in /sys/bus/pci/devices/*; do
   printf 'enabled: '; cat "$device/enable"
   printf 'driver: '; readlink "$device/driver" 2>/dev/null || printf 'none\n'
   ls -l "$device/resource2" 2>/dev/null || true
+  ls -l "$device/resource2_wc" 2>/dev/null || true
   printf 'BAR2 resource: '; sed -n '3p' "$device/resource"
 done
 printf '\nGuest kernel lockdown status:\n'

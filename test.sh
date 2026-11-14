@@ -14,6 +14,16 @@ bash "$ROOT/tests/ivshmem_permissions_test.sh"
 "$ROOT/_build/tests/ivshmem_pci_test"
 if [[ ${LG_WITH_BACKEND_TEST:-0} == 1 ]]; then
   SRC="$ROOT/_upstream/LookingGlass"
+  GEN="$ROOT/_build/host/platform/Linux/capture/pipewire"
+  wayland-scanner server-header "$ROOT/overlay/host/platform/Linux/capture/pipewire/src/zkde-screencast-unstable-v1.xml" "$GEN/zkde-screencast-server.h"
+  "${CC:-cc}" -std=gnu11 -D_GNU_SOURCE -Wall -Werror -O1 -pthread \
+    -I "$GEN" -I "$SRC/common/include" -I "$SRC/host/platform/Linux/capture/pipewire/src" \
+    $(pkg-config --cflags wayland-client wayland-server) \
+    "$ROOT/tests/kde_source_test.c" "$ROOT/tests/ivshmem_test_debug.c" \
+    "$ROOT/overlay/host/platform/Linux/capture/pipewire/src/kde_capture.c" \
+    "$GEN/zkde-screencast-protocol.c" \
+    $(pkg-config --libs wayland-client wayland-server) -o "$ROOT/_build/tests/kde_source_test"
+  "$ROOT/_build/tests/kde_source_test"
   "${CC:-cc}" -std=gnu11 -D_GNU_SOURCE -Wall -Werror -O1 \
     $(pkg-config --cflags libspa-0.2) \
     "$ROOT/tests/format_negotiation_test.c" -o "$ROOT/_build/tests/format_negotiation_test"

@@ -1,3 +1,71 @@
+diff --git a/common/src/framebuffer.c b/common/src/framebuffer.c
+--- a/common/src/framebuffer.c
++++ b/common/src/framebuffer.c
+@@ -205,7 +205,11 @@
+     wp   += 64;
+ 
+     if (wp % FB_CHUNK_SIZE == 0)
+-      atomic_store_explicit(&frame->wp, wp, memory_order_release);
++      {
++      /* Flush NT/WC pixel stores before publishing readiness to B7 readers. */
++      _mm_sfence();
++      atomic_store_explicit(&frame->wp, wp, memory_order_release);
++    }
+   }
+ 
+   if(size)
+@@ -214,7 +218,11 @@
+     wp += size;
+   }
+ 
+-  atomic_store_explicit(&frame->wp, wp, memory_order_release);
++  {
++      /* Flush NT/WC pixel stores before publishing readiness to B7 readers. */
++      _mm_sfence();
++      atomic_store_explicit(&frame->wp, wp, memory_order_release);
++    }
+ 
+ #ifdef FB_PROFILE
+   runningavg_push(ra, microtime() - ts);
+@@ -267,7 +275,11 @@
+     wp   += 128;
+ 
+     if (wp % FB_CHUNK_SIZE == 0)
+-      atomic_store_explicit(&frame->wp, wp, memory_order_release);
++      {
++      /* Flush NT/WC pixel stores before publishing readiness to B7 readers. */
++      _mm_sfence();
++      atomic_store_explicit(&frame->wp, wp, memory_order_release);
++    }
+   }
+ 
+   if (size > 63)
+@@ -284,7 +296,11 @@
+     wp   += 64;
+ 
+     if (wp % FB_CHUNK_SIZE == 0)
+-      atomic_store_explicit(&frame->wp, wp, memory_order_release);
++      {
++      /* Flush NT/WC pixel stores before publishing readiness to B7 readers. */
++      _mm_sfence();
++      atomic_store_explicit(&frame->wp, wp, memory_order_release);
++    }
+   }
+ 
+   if (size)
+@@ -293,7 +309,11 @@
+     wp += size;
+   }
+ 
+-  atomic_store_explicit(&frame->wp, wp, memory_order_release);
++  {
++      /* Flush NT/WC pixel stores before publishing readiness to B7 readers. */
++      _mm_sfence();
++      atomic_store_explicit(&frame->wp, wp, memory_order_release);
++    }
+ 
+ #ifdef FB_PROFILE
+   runningavg_push(ra, microtime() - ts);
 diff --git a/common/src/platform/linux/CMakeLists.txt b/common/src/platform/linux/CMakeLists.txt
 --- a/common/src/platform/linux/CMakeLists.txt
 +++ b/common/src/platform/linux/CMakeLists.txt
@@ -28,7 +96,12 @@ diff --git a/common/src/platform/linux/ivshmem.c b/common/src/platform/linux/ivs
  
  #include "common/array.h"
  #include "common/debug.h"
-@@ -46,6 +48,9 @@
+@@ -42,10 +44,14 @@
+   int  devFd;
+   int  size;
+   bool hasDMA;
++  bool writeCombined;
+ };
  
  static bool ivshmemDeviceValidator(struct Option * opt, const char ** error)
  {
@@ -38,7 +111,7 @@ diff --git a/common/src/platform/linux/ivshmem.c b/common/src/platform/linux/ivs
    // if it's not a kvmfr device, it must be a file on disk
    if (strlen(opt->value.x_string) > 3 && memcmp(opt->value.x_string, "kvmfr", 5) != 0)
    {
-@@ -64,6 +69,7 @@
+@@ -64,6 +70,7 @@
  static StringList ivshmemDeviceGetValues(struct Option * option)
  {
    StringList sl = stringlist_new(true);
@@ -46,7 +119,7 @@ diff --git a/common/src/platform/linux/ivshmem.c b/common/src/platform/linux/ivs
  
    DIR * d = opendir("/sys/class/kvmfr");
    if (!d)
-@@ -87,13 +93,10 @@
+@@ -87,13 +94,10 @@
  void ivshmemOptionsInit(void)
  {
    char * shmFile;
@@ -64,7 +137,7 @@ diff --git a/common/src/platform/linux/ivshmem.c b/common/src/platform/linux/ivs
  
    struct Option options[] =
    {
-@@ -101,7 +104,7 @@
+@@ -101,7 +105,7 @@
        .module         = "app",
        .name           = "shmFile",
        .shortopt       = 'f',
@@ -73,10 +146,11 @@ diff --git a/common/src/platform/linux/ivshmem.c b/common/src/platform/linux/ivs
        .type           = OPTION_TYPE_STRING,
        .value.x_string = shmFile,
        .validator      = ivshmemDeviceValidator,
-@@ -131,14 +134,30 @@
+@@ -131,14 +135,36 @@
    int devSize;
    int devFd;
    bool hasDMA;
++  bool writeCombined = false;
 +  struct LGPciMapping pci;
 +  bool isPCI = !strcmp(shmDevice, "ivshmem") || !strncmp(shmDevice, "ivshmem:", 8);
  
@@ -96,6 +170,11 @@ diff --git a/common/src/platform/linux/ivshmem.c b/common/src/platform/linux/ivs
 +      return false;
 +    }
 +    shmDevice = pci.path;
++    if (pci.wcPath[0] && access(pci.wcPath, R_OK | W_OK) == 0)
++    {
++      shmDevice = pci.wcPath;
++      writeCombined = true;
++    }
 +    DEBUG_INFO("PCI IVSHMEM BAR2 : %s (%zu MiB)", shmDevice, pci.size / 1048576);
 +  }
  
@@ -106,16 +185,22 @@ diff --git a/common/src/platform/linux/ivshmem.c b/common/src/platform/linux/ivs
      if (devFd < 0)
      {
        DEBUG_ERROR("Failed to open: %s", shmDevice);
-@@ -158,7 +177,7 @@
+@@ -158,7 +184,13 @@
    }
    else
    {
 -    devFd = open(shmDevice, O_RDWR, (mode_t)0600);
 +    devFd = open(shmDevice, O_RDWR | O_CLOEXEC, (mode_t)0600);
++    if (devFd < 0 && writeCombined)
++    {
++      writeCombined = false;
++      shmDevice = pci.path;
++      devFd = open(shmDevice, O_RDWR | O_CLOEXEC);
++    }
      if (devFd < 0)
      {
        DEBUG_ERROR("Failed to open: %s", shmDevice);
-@@ -175,7 +194,13 @@
+@@ -175,23 +207,54 @@
        return false;
      }
  
@@ -130,7 +215,18 @@ diff --git a/common/src/platform/linux/ivshmem.c b/common/src/platform/linux/ivs
      hasDMA  = false;
    }
  
-@@ -184,11 +209,19 @@
+   void * map = mmap(0, devSize, PROT_READ | PROT_WRITE, MAP_SHARED, devFd, 0);
++  if (map == MAP_FAILED && writeCombined)
++  {
++    DEBUG_WARN("Write-combining mapping failed (%s); falling back to ordinary BAR2", strerror(errno));
++    close(devFd);
++    devFd = open(pci.path, O_RDWR | O_CLOEXEC);
++    writeCombined = false;
++    shmDevice = pci.path;
++    if (devFd >= 0)
++      map = mmap(0, devSize, PROT_READ | PROT_WRITE, MAP_SHARED, devFd, 0);
++  }
+   if (map == MAP_FAILED)
    {
      DEBUG_ERROR("Failed to map the shared memory device: %s", shmDevice);
      DEBUG_ERROR("%s", strerror(errno));
@@ -150,11 +246,21 @@ diff --git a/common/src/platform/linux/ivshmem.c b/common/src/platform/linux/ivs
    info->size   = devSize;
    info->devFd  = devFd;
    info->hasDMA = hasDMA;
++  info->writeCombined = writeCombined;
++  if (isPCI)
++  {
++    DEBUG_INFO("PCI cache mode   : %s", writeCombined ? "write-combining (resource2_wc)" : "ordinary/uncached BAR2 fallback");
++    if (!writeCombined)
++      DEBUG_WARN("For higher upload rates, re-run install.sh to grant resource2_wc access (when exported by the guest kernel)");
++  }
+ 
+   dev->opaque = info;
+   dev->size   = devSize;
 diff --git a/common/src/platform/linux/ivshmem_pci.c b/common/src/platform/linux/ivshmem_pci.c
 new file mode 100644
 --- /dev/null
 +++ b/common/src/platform/linux/ivshmem_pci.c
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,144 @@
 +/* SPDX-License-Identifier: GPL-2.0-or-later */
 +#include "ivshmem_pci.h"
 +#include <ctype.h>
@@ -284,6 +390,13 @@ new file mode 100644
 +      end - start >= INT_MAX || end - start + 1 < 4096)
 +    goto invalidResource;
 +  mapping->size = (size_t)(end - start + 1);
++  mapping->wcPath[0] = '\0';
++  /* Linux exports this alias only for a prefetchable BAR on WC-capable
++   * architectures. Never change cache attributes on an arbitrary PCI BAR. */
++  if ((flags & 0x2000) &&
++      snprintf(path, sizeof(path), "%s/%s/resource2_wc", root, selected) < sizeof(path) &&
++      lstat(path, &st) == 0 && S_ISREG(st.st_mode))
++    strcpy(mapping->wcPath, path);
 +  if (snprintf(mapping->path, sizeof(mapping->path), "%s/%s/resource2", root, selected) >= sizeof(mapping->path))
 +    goto invalidResource;
 +  return true;
@@ -296,7 +409,7 @@ diff --git a/common/src/platform/linux/ivshmem_pci.h b/common/src/platform/linux
 new file mode 100644
 --- /dev/null
 +++ b/common/src/platform/linux/ivshmem_pci.h
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,18 @@
 +/* SPDX-License-Identifier: GPL-2.0-or-later */
 +#pragma once
 +#include <stdbool.h>
@@ -307,6 +420,7 @@ new file mode 100644
 +struct LGPciMapping
 +{
 +  char path[PATH_MAX];
++  char wcPath[PATH_MAX];
 +  size_t size;
 +};
 +
@@ -314,6 +428,53 @@ new file mode 100644
 +/* root is /sys/bus/pci/devices in production; tests supply a fixture tree. */
 +bool lgPciResolve(const char * root, const char * address,
 +  struct LGPciMapping * mapping, char * error, size_t errorSize);
+diff --git a/host/platform/Linux/capture/pipewire/CMakeLists.txt b/host/platform/Linux/capture/pipewire/CMakeLists.txt
+--- a/host/platform/Linux/capture/pipewire/CMakeLists.txt
++++ b/host/platform/Linux/capture/pipewire/CMakeLists.txt
+@@ -1,25 +1,22 @@
+ cmake_minimum_required(VERSION 3.10)
+ project(capture_pipewire LANGUAGES C)
+-
+ find_package(PkgConfig)
+ pkg_check_modules(CAPTURE_PIPEWIRE REQUIRED IMPORTED_TARGET
+-  gio-2.0
+-  gio-unix-2.0
+-  libpipewire-0.3
+-  libspa-0.2
+-)
+-
+-add_library(capture_pipewire STATIC
+-  src/pipewire.c
+-  src/portal.c
+-)
+-
+-target_link_libraries(capture_pipewire
+-  PkgConfig::CAPTURE_PIPEWIRE
+-  lg_common
+-)
+-
+-target_include_directories(capture_pipewire
+-  PRIVATE
+-    src
+-)
++  gio-2.0 gio-unix-2.0 libpipewire-0.3 libspa-0.2 wayland-client)
++find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
++set(PROTOCOL_XML ${CMAKE_CURRENT_SOURCE_DIR}/src/zkde-screencast-unstable-v1.xml)
++set(PROTOCOL_H ${CMAKE_CURRENT_BINARY_DIR}/zkde-screencast-client.h)
++set(PROTOCOL_C ${CMAKE_CURRENT_BINARY_DIR}/zkde-screencast-protocol.c)
++add_custom_command(OUTPUT ${PROTOCOL_H} ${PROTOCOL_C}
++  COMMAND ${WAYLAND_SCANNER} client-header ${PROTOCOL_XML} ${PROTOCOL_H}
++  COMMAND ${WAYLAND_SCANNER} private-code ${PROTOCOL_XML} ${PROTOCOL_C}
++  DEPENDS ${PROTOCOL_XML})
++add_library(capture_kde STATIC src/kde_capture.c ${PROTOCOL_H} ${PROTOCOL_C})
++target_include_directories(capture_kde PUBLIC src ${CMAKE_CURRENT_BINARY_DIR})
++target_link_libraries(capture_kde PkgConfig::CAPTURE_PIPEWIRE lg_common)
++add_library(capture_pipewire STATIC src/pipewire.c src/portal.c)
++target_link_libraries(capture_pipewire PkgConfig::CAPTURE_PIPEWIRE capture_kde lg_common)
++target_include_directories(capture_pipewire PRIVATE src)
++add_executable(lg-kde-source src/kde_list.c)
++target_link_libraries(lg-kde-source capture_kde)
++set_target_properties(lg-kde-source PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 diff --git a/host/platform/Linux/capture/pipewire/src/format_params.h b/host/platform/Linux/capture/pipewire/src/format_params.h
 new file mode 100644
 --- /dev/null
@@ -401,10 +562,281 @@ new file mode 100644
 +    memcpy(dst + y * layout->rowBytes, src + y * layout->sourcePitch,
 +      layout->rowBytes);
 +}
+diff --git a/host/platform/Linux/capture/pipewire/src/kde_capture.c b/host/platform/Linux/capture/pipewire/src/kde_capture.c
+new file mode 100644
+--- /dev/null
++++ b/host/platform/Linux/capture/pipewire/src/kde_capture.c
+@@ -0,0 +1,237 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/* KDE-specific native desktop integration. The compositor authorizes this
++ * executable using its own per-application Wayland capability policy. Never
++ * disable KWin permission checks. GNOME/other desktops keep the portal path. */
++#include "kde_capture.h"
++#include "zkde-screencast-client.h"
++#include "common/debug.h"
++#include <errno.h>
++#include <poll.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++#include <wayland-client.h>
++
++struct Output
++{
++  struct wl_output * object;
++  uint32_t global;
++  char name[256], description[512];
++  int width, height, refresh;
++};
++struct KDECapture
++{
++  struct wl_display * display;
++  struct wl_registry * registry;
++  struct zkde_screencast_unstable_v1 * manager;
++  struct zkde_screencast_stream_unstable_v1 * stream;
++  struct Output outputs[32];
++  unsigned count;
++  uint32_t selected, node;
++  bool alive;
++};
++static uint64_t nowMs(void)
++{
++  struct timespec now;
++  clock_gettime(CLOCK_MONOTONIC, &now);
++  return (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
++}
++/* Single-threaded owner. prepare_read handles pending events without races;
++ * every blocking wait has a deadline, including registry enumeration. */
++static int dispatch(struct KDECapture * c, int timeout)
++{
++  while (wl_display_prepare_read(c->display) != 0)
++    if (wl_display_dispatch_pending(c->display) < 0) return -1;
++  int flush = wl_display_flush(c->display);
++  if (flush < 0 && errno != EAGAIN) { wl_display_cancel_read(c->display); return -1; }
++  struct pollfd fd = {.fd = wl_display_get_fd(c->display),
++    .events = POLLIN | (flush < 0 ? POLLOUT : 0)};
++  int status = poll(&fd, 1, timeout);
++  if (status <= 0 || !(fd.revents & POLLIN))
++  {
++    wl_display_cancel_read(c->display);
++    if (status < 0 && errno == EINTR) return 0;
++    if (fd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
++    return status;
++  }
++  if (wl_display_read_events(c->display) < 0 ||
++      wl_display_dispatch_pending(c->display) < 0) return -1;
++  return 1;
++}
++static void synced(void * data, struct wl_callback * callback, uint32_t serial)
++{
++  *(bool *)data = true;
++}
++static const struct wl_callback_listener syncListener = {.done = synced};
++static bool roundTrip(struct KDECapture * c)
++{
++  bool done = false;
++  struct wl_callback * sync = wl_display_sync(c->display);
++  if (!sync) return false;
++  wl_callback_add_listener(sync, &syncListener, &done);
++  uint64_t end = nowMs() + 5000;
++  while (!done)
++  {
++    int left = (int)(end - nowMs());
++    if (left <= 0 || dispatch(c, left) < 0) break;
++  }
++  wl_callback_destroy(sync);
++  return done;
++}
++static void geometry(void * data, struct wl_output * output, int32_t x,
++  int32_t y, int32_t width, int32_t height, int32_t subpixel,
++  const char * make, const char * model, int32_t transform) {}
++static void mode(void * data, struct wl_output * output, uint32_t flags,
++  int32_t width, int32_t height, int32_t refresh)
++{
++  struct Output * o = data;
++  if (flags & WL_OUTPUT_MODE_CURRENT)
++    { o->width = width; o->height = height; o->refresh = refresh; }
++}
++static void outputDone(void * data, struct wl_output * output) {}
++static void scale(void * data, struct wl_output * output, int32_t factor) {}
++static void outputName(void * data, struct wl_output * output, const char * name)
++{
++  snprintf(((struct Output *)data)->name, sizeof(((struct Output *)data)->name), "%s", name);
++}
++static void description(void * data, struct wl_output * output, const char * text)
++{
++  struct Output * o = data;
++  snprintf(o->description, sizeof(o->description), "%s", text);
++  for (char * p = o->description; *p; ++p) if (*p == '\t' || *p == '\n' || *p == '\r') *p = ' ';
++}
++static const struct wl_output_listener outputListener = {
++  .geometry = geometry, .mode = mode, .done = outputDone, .scale = scale,
++  .name = outputName, .description = description
++};
++static void global(void * data, struct wl_registry * registry, uint32_t name,
++  const char * interface, uint32_t version)
++{
++  struct KDECapture * c = data;
++  if (!strcmp(interface, "wl_output") && version >= 4 && c->count < 32)
++  {
++    struct Output * o = &c->outputs[c->count++];
++    o->global = name;
++    o->object = wl_registry_bind(registry, name, &wl_output_interface, 4);
++    wl_output_add_listener(o->object, &outputListener, o);
++  }
++  else if (!strcmp(interface, "zkde_screencast_unstable_v1"))
++    c->manager = wl_registry_bind(registry, name, &zkde_screencast_unstable_v1_interface, 1);
++}
++static void removed(void * data, struct wl_registry * registry, uint32_t name)
++{
++  struct KDECapture * c = data;
++  if (c->selected == name) c->alive = false;
++  for (unsigned i = 0; i < c->count; ++i)
++    if (c->outputs[i].global == name) c->outputs[i].name[0] = '\0';
++}
++static const struct wl_registry_listener registryListener = {.global = global, .global_remove = removed};
++static void closed(void * data, struct zkde_screencast_stream_unstable_v1 * stream)
++{
++  ((struct KDECapture *)data)->alive = false;
++  DEBUG_WARN("KWin closed the selected output stream");
++}
++static void created(void * data, struct zkde_screencast_stream_unstable_v1 * stream, uint32_t node)
++{
++  ((struct KDECapture *)data)->node = node;
++}
++static void failed(void * data, struct zkde_screencast_stream_unstable_v1 * stream, const char * error)
++{
++  ((struct KDECapture *)data)->alive = false;
++  DEBUG_ERROR("KWin capture failed: %s", error);
++}
++static const struct zkde_screencast_stream_unstable_v1_listener streamListener = {
++  .closed = closed, .created = created, .failed = failed
++};
++static struct KDECapture * connectDisplay(void)
++{
++  struct KDECapture * c = calloc(1, sizeof(*c));
++  if (!c) return NULL;
++  c->alive = true;
++  c->display = wl_display_connect(NULL);
++  if (!c->display) goto fail;
++  c->registry = wl_display_get_registry(c->display);
++  wl_registry_add_listener(c->registry, &registryListener, c);
++  if (!roundTrip(c) || !roundTrip(c)) goto fail;
++  if (!c->manager)
++  {
++    DEBUG_ERROR("KWin native capture interface unavailable. Re-run install.sh to register this executable's KDE capability; do not disable compositor permission checks.");
++    goto fail;
++  }
++  return c;
++fail:
++  DEBUG_ERROR("Cannot enumerate native KDE outputs in this Wayland session");
++  lgKdeCapture_close(c);
++  return NULL;
++}
++struct KDECapture * lgKdeCapture_open(const char * connector)
++{
++  struct KDECapture * c = connectDisplay();
++  if (!c) return NULL;
++  for (unsigned i = 0; i < c->count; ++i)
++  {
++    struct Output * o = &c->outputs[i];
++    if (strcmp(connector, o->name)) continue;
++    c->selected = o->global;
++    c->stream = zkde_screencast_unstable_v1_stream_output(c->manager,
++      o->object, ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_EMBEDDED);
++    zkde_screencast_stream_unstable_v1_add_listener(c->stream, &streamListener, c);
++    uint64_t end = nowMs() + 15000;
++    while (!c->node && c->alive)
++    {
++      int left = (int)(end - nowMs());
++      if (left <= 0 || dispatch(c, left) < 0) break;
++    }
++    if (c->node && c->alive)
++    {
++      DEBUG_INFO("KDE native monitor: %s, %dx%d @ %.3f Hz, PipeWire node %u", connector,
++        o->width, o->height, o->refresh / 1000.0, c->node);
++      return c;
++    }
++    break;
++  }
++  DEBUG_ERROR("Cannot capture the saved KDE connector %s; enable it in Display Configuration or choose again with install.sh", connector);
++  lgKdeCapture_close(c);
++  return NULL;
++}
++uint32_t lgKdeCapture_node(struct KDECapture * c) { return c->node; }
++unsigned lgKdeCapture_refresh(struct KDECapture * c)
++{
++  for (unsigned i = 0; i < c->count; ++i)
++    if (c->outputs[i].global == c->selected && c->outputs[i].refresh > 0)
++      return (unsigned)c->outputs[i].refresh;
++  return 0;
++}
++bool lgKdeCapture_alive(struct KDECapture * c)
++{
++  if (dispatch(c, 0) < 0) c->alive = false;
++  return c->alive;
++}
++void lgKdeCapture_close(struct KDECapture * c)
++{
++  if (!c) return;
++  if (c->stream) zkde_screencast_stream_unstable_v1_close(c->stream);
++  if (c->manager) zkde_screencast_unstable_v1_destroy(c->manager);
++  for (unsigned i = 0; i < c->count; ++i)
++    if (c->outputs[i].object) wl_output_release(c->outputs[i].object);
++  if (c->registry) wl_registry_destroy(c->registry);
++  if (c->display) { wl_display_flush(c->display); wl_display_disconnect(c->display); }
++  free(c);
++}
++int lgKdeCapture_list(void)
++{
++  struct KDECapture * c = connectDisplay();
++  if (!c) return 1;
++  unsigned count = 0;
++  for (unsigned i = 0; i < c->count; ++i)
++  {
++    struct Output * o = &c->outputs[i];
++    if (!o->name[0]) continue;
++    printf("%s\t%dx%d\t%.3f Hz\t%s\n", o->name, o->width, o->height,
++      o->refresh / 1000.0, o->description);
++    ++count;
++  }
++  lgKdeCapture_close(c);
++  return count ? 0 : 1;
++}
+diff --git a/host/platform/Linux/capture/pipewire/src/kde_capture.h b/host/platform/Linux/capture/pipewire/src/kde_capture.h
+new file mode 100644
+--- /dev/null
++++ b/host/platform/Linux/capture/pipewire/src/kde_capture.h
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++#pragma once
++#include <stdbool.h>
++#include <stdint.h>
++struct KDECapture;
++struct KDECapture * lgKdeCapture_open(const char * connector);
++uint32_t lgKdeCapture_node(struct KDECapture * capture);
++unsigned lgKdeCapture_refresh(struct KDECapture * capture);
++bool lgKdeCapture_alive(struct KDECapture * capture);
++void lgKdeCapture_close(struct KDECapture * capture);
++int lgKdeCapture_list(void);
+diff --git a/host/platform/Linux/capture/pipewire/src/kde_list.c b/host/platform/Linux/capture/pipewire/src/kde_list.c
+new file mode 100644
+--- /dev/null
++++ b/host/platform/Linux/capture/pipewire/src/kde_list.c
+@@ -0,0 +1,8 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++#include "kde_capture.h"
++#include "common/debug.h"
++int main(void)
++{
++  debug_init();
++  return lgKdeCapture_list();
++}
 diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform/Linux/capture/pipewire/src/pipewire.c
 --- a/host/platform/Linux/capture/pipewire/src/pipewire.c
 +++ b/host/platform/Linux/capture/pipewire/src/pipewire.c
-@@ -1,493 +1,515 @@
+@@ -1,493 +1,578 @@
  /**
   * Looking Glass
 - * Copyright © 2017-2025 The Looking Glass Authors
@@ -431,6 +863,7 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
   */
 -
  #include "portal.h"
++#include "kde_capture.h"
 +#include "frame_layout.h"
 +#include "format_params.h"
  #include "interface/capture.h"
@@ -462,6 +895,7 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -  struct pw_stream      * stream;
 -  struct spa_hook         streamListener;
 +  struct Portal * portal;
++  struct KDECapture * kde;
 +  char * sessionHandle;
 +  struct pw_thread_loop * loop;
 +  struct pw_context * context;
@@ -473,7 +907,10 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +  bool started, stop, failed, hasFormat, connected, warnedBuffer;
 +  bool loggedBuffer, loggedCopy, loggedWrite, warnedNoFrame;
 +  uint64_t captureStartedAt, receivedBuffers, rejectedBuffers;
++  uint64_t copiedFrames, writtenFrames, copyNs, writeNs;
++  uint64_t statsTime, statsReceived, statsCopied, statsWritten, statsCopyNs, statsWriteNs;
 +  unsigned width, height, formatVer;
++  unsigned requestedFPS;
 +  CaptureFormat format;
 +  /* Only the Looking Glass capture thread touches the snapshot. */
 +  uint8_t * snapshot;
@@ -507,20 +944,23 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -
 +static bool fpsValidator(struct Option * opt, const char ** error)
 +{
-+  if (opt->value.x_int >= 1 && opt->value.x_int <= 360)
++  if (opt->value.x_int >= 0 && opt->value.x_int <= 360)
 +    return true;
-+  *error = "PipeWire fps must be between 1 and 360";
++  *error = "PipeWire fps must be 0 (automatic) or between 1 and 360";
 +  return false;
 +}
 +static void pipewire_initOptions(void)
 +{
 +  struct Option options[] = {
 +    {.module = "pipewire", .name = "fps",
-+     .description = "Requested maximum capture rate (compositor may limit it)",
-+     .type = OPTION_TYPE_INT, .value.x_int = 60, .validator = fpsValidator},
++     .description = "Maximum capture rate; 0 matches KDE output refresh (portal default 60)",
++     .type = OPTION_TYPE_INT, .value.x_int = 0, .validator = fpsValidator},
 +    {.module = "pipewire", .name = "restore",
 +     .description = "Reuse the saved monitor selection (no requests a fresh chooser)",
-+     .type = OPTION_TYPE_BOOL, .value.x_bool = true}, {0}
++     .type = OPTION_TYPE_BOOL, .value.x_bool = true},
++    {.module = "pipewire", .name = "kdeOutput",
++     .description = "Saved KDE connector for native unattended capture (empty uses portal)",
++     .type = OPTION_TYPE_STRING, .value.x_string = ""}, {0}
 +  };
 +  option_register(options);
 +}
@@ -543,15 +983,6 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +{
    pw_init(NULL, NULL);
    this = calloc(1, sizeof(*this));
--  return true;
--}
--
--static void coreErrorCallback(void * opaque, uint32_t id, int seq, int res, const char * message)
--{
--  DEBUG_ERROR("pipewire error: id %" PRIu32 ", seq: %d, res: %d (%s): %s",
--    id, seq, res, strerror(res), message);
--}
--
 +  return this != NULL;
 +}
 +static void discardPending(void)
@@ -569,36 +1000,9 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +  this->failed = true;
 +  pw_thread_loop_signal(this->loop, false);
 +}
- static const struct pw_core_events coreEvents = {
--  PW_VERSION_CORE_EVENTS,
--  .error = coreErrorCallback,
++static const struct pw_core_events coreEvents = {
 +  PW_VERSION_CORE_EVENTS, .error = coreError
- };
--
--static bool startStream(struct pw_stream * stream, uint32_t node)
--{
--  char buffer[1024];
--  struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
--  const struct spa_pod * param = spa_pod_builder_add_object(
--    &builder, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
--    SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
--    SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
--    SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(6,
--      SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA,
--      SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx,
--      SPA_VIDEO_FORMAT_xBGR_210LE, SPA_VIDEO_FORMAT_RGBA_F16),
--    SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(
--      &SPA_RECTANGLE(1920, 1080), &SPA_RECTANGLE(1, 1), &SPA_RECTANGLE(8192, 4320)),
--    SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(
--      &SPA_FRACTION(60, 1), &SPA_FRACTION(0, 1), &SPA_FRACTION(360, 1)));
--
--  return pw_stream_connect(stream, PW_DIRECTION_INPUT, node,
--    PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, &param, 1) >= 0;
--}
--
--static void streamProcessCallback(void * opaque)
--{
--  if (!this->hasFormat)
++};
 +static void streamProcess(void * opaque)
 +{
 +  /* RT_PROCESS is not enabled: callbacks run with the loop lock held. */
@@ -646,6 +1050,233 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +static void streamFormat(void * opaque, uint32_t id, const struct spa_pod * param)
 +{
 +  if (id != SPA_PARAM_Format)
++    return;
++  discardPending();
++  this->hasFormat = false;
++  if (!param)
++    return;
++  struct spa_video_info_raw info = {0};
++  if (spa_format_video_raw_parse(param, &info) < 0 ||
++      !info.size.width || !info.size.height ||
++      info.size.width > 8192 || info.size.height > 8192)
++    goto unsupported;
++  if (spa_pod_find_prop(param, NULL, SPA_FORMAT_VIDEO_modifier))
++  {
++    DEBUG_ERROR("Unexpected DMA-BUF modifier: this capture path requires CPU-readable MemFd/MemPtr buffers");
++    goto unsupported;
++  }
++  switch (info.format)
++  {
++    case SPA_VIDEO_FORMAT_BGRA:
++    case SPA_VIDEO_FORMAT_BGRx: this->format = CAPTURE_FMT_BGRA; break;
++    case SPA_VIDEO_FORMAT_RGBA:
++    case SPA_VIDEO_FORMAT_RGBx: this->format = CAPTURE_FMT_RGBA; break;
++    default: goto unsupported;
++  }
++  this->width = info.size.width;
++  this->height = info.size.height;
++  ++this->formatVer;
++  this->hasFormat = true;
++  uint8_t storage[512];
++  struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage, sizeof(storage));
++  const struct spa_pod * buffers = lgPipewireBuffers(&builder);
++  if (pw_stream_update_params(this->stream, &buffers, 1) < 0)
++    goto unsupported;
++  DEBUG_INFO("Raw SDR capture: %ux%u, format %u", this->width,
++    this->height, info.format);
++  pw_thread_loop_signal(this->loop, false);
++  return;
++unsupported:
++  DEBUG_ERROR("Unsupported PipeWire raw format/geometry/memory: format=%u size=%ux%u",
++    info.format, info.size.width, info.size.height);
++  this->failed = true;
++  pw_thread_loop_signal(this->loop, false);
++}
++static const struct pw_stream_events streamEvents = {
++  PW_VERSION_STREAM_EVENTS, .state_changed = streamState,
++  .param_changed = streamFormat, .process = streamProcess,
++  .remove_buffer = streamRemoveBuffer
++};
++static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
++{
++  /* B7's per-frame allocation includes the page before FrameBuffer.data. */
++  this->frameHeaderSize = *alignSize;
++  /* B7 deinitializes capture whenever its last LGMP client disconnects, even
++   * immediately after initial setup. Keep the consent/session and chosen
++   * monitor alive across that idle transition; resume the SAME stream. */
++  if (this->stream)
++  {
++    if (this->kde && !lgKdeCapture_alive(this->kde)) return false;
++    pw_thread_loop_lock(this->loop);
++    this->stop = false;
++    int status = this->failed ? -EPIPE : pw_stream_set_active(this->stream, true);
++    pw_thread_loop_unlock(this->loop);
++    if (status < 0)
++    {
++      DEBUG_ERROR("Cannot resume the selected monitor: %s", strerror(-status));
++      return false;
++    }
++    DEBUG_INFO("Resuming the existing monitor session (no new chooser)");
++    this->statsTime = 0;
++    return true;
++  }
++  const char * stage = "opening the desktop portal";
++  this->stop = this->failed = this->hasFormat = this->connected = false;
++  this->warnedBuffer = false;
++  this->loggedBuffer = this->loggedCopy = this->loggedWrite = this->warnedNoFrame = false;
++  this->captureStartedAt = this->receivedBuffers = this->rejectedBuffers = 0;
++  this->readyWidth = this->readyHeight = 0;
++  int fd = -1;
++  uint32_t node;
++  const char * connector = option_get_string("pipewire", "kdeOutput");
++  if (*connector)
++  {
++    stage = "opening the saved native KDE connector";
++    this->kde = lgKdeCapture_open(connector);
++    if (!this->kde) goto fail;
++    node = lgKdeCapture_node(this->kde);
++  }
++  else
++  {
++    this->portal = portal_create();
++    if (!this->portal) goto fail;
++    stage = "ScreenCast.CreateSession";
++    if (!portal_createScreenCastSession(this->portal, &this->sessionHandle)) goto fail;
++    stage = "ScreenCast.SelectSources";
++    if (!portal_selectSource(this->portal, this->sessionHandle,
++          option_get_bool("pipewire", "restore"))) goto fail;
++    stage = "ScreenCast.Start / monitor selection";
++    node = portal_getPipewireNode(this->portal, this->sessionHandle);
++    if (!node) goto fail;
++    stage = "ScreenCast.OpenPipeWireRemote";
++    fd = portal_openPipewireRemote(this->portal, this->sessionHandle);
++    if (fd < 0) goto fail;
++  }
++  stage = "creating the PipeWire thread loop";
++  this->loop = pw_thread_loop_new("looking-glass-capture", NULL);
++  if (!this->loop)
++  {
++    DEBUG_ERROR("pw_thread_loop_new: %s", strerror(errno));
++    if (fd >= 0) close(fd);
++    goto fail;
++  }
++  stage = "creating the PipeWire context";
++  this->context = pw_context_new(pw_thread_loop_get_loop(this->loop), NULL, 0);
++  if (!this->context)
++  {
++    DEBUG_ERROR("pw_context_new: %s", strerror(errno));
++    if (fd >= 0) close(fd);
++    goto fail;
++  }
++  stage = "starting the PipeWire thread loop";
++  int status = pw_thread_loop_start(this->loop);
++  if (status < 0)
++  {
++    DEBUG_ERROR("pw_thread_loop_start: %s", strerror(-status));
++    if (fd >= 0) close(fd);
++    goto fail;
++  }
++  this->started = true;
++  pw_thread_loop_lock(this->loop);
++  stage = "connecting to the portal PipeWire remote";
++  this->core = fd >= 0 ? pw_context_connect_fd(this->context, fd, NULL, 0) :
++    pw_context_connect(this->context, NULL, 0);
++  if (!this->core)
++  {
++    DEBUG_ERROR("pw_context_connect_fd: %s", strerror(errno));
++    goto failLocked;
++  }
++  pw_core_add_listener(this->core, &this->coreListener, &coreEvents, NULL);
++  stage = "creating the PipeWire capture stream";
++  this->stream = pw_stream_new(this->core, "Looking Glass Linux Guest",
++    pw_properties_new(PW_KEY_NODE_NAME, "looking-glass-capture",
++      PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY,
++      "Capture", PW_KEY_MEDIA_ROLE, "Screen", NULL));
++  if (!this->stream)
++  {
++    DEBUG_ERROR("pw_stream_new: %s", strerror(errno));
++    goto failLocked;
++  }
++  pw_stream_add_listener(this->stream, &this->streamListener, &streamEvents, NULL);
++  uint8_t storage[1024];
++  struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage, sizeof(storage));
++  unsigned fps = option_get_int("pipewire", "fps");
++  if (!fps && this->kde)
++    fps = (lgKdeCapture_refresh(this->kde) + 999) / 1000;
++  if (!fps) fps = 60;
++  if (fps > 360) fps = 360;
++  this->requestedFPS = fps;
++  DEBUG_INFO("Requested capture maximum: %u fps", fps);
++  const struct spa_pod * format = lgPipewireFormat(&builder, fps);
++  stage = "connecting the PipeWire capture stream";
++  status = pw_stream_connect(this->stream, PW_DIRECTION_INPUT, node,
++        PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, &format, 1);
++  if (status < 0)
++  {
++    DEBUG_ERROR("pw_stream_connect: %s", strerror(-status));
++    goto failLocked;
++  }
++  stage = "negotiating the raw video format";
++  struct timespec deadline;
++  pw_thread_loop_get_time(this->loop, &deadline, 15 * SPA_NSEC_PER_SEC);
++  while (!this->hasFormat && !this->failed)
++    if (pw_thread_loop_timed_wait_full(this->loop, &deadline) < 0)
++    {
++      DEBUG_ERROR("Timed out waiting for a PipeWire video format");
++      goto failLocked;
++    }
++  if (this->failed)
++    goto failLocked;
++  pw_thread_loop_unlock(this->loop);
+   return true;
+-}
+-
+-static void coreErrorCallback(void * opaque, uint32_t id, int seq, int res, const char * message)
+-{
+-  DEBUG_ERROR("pipewire error: id %" PRIu32 ", seq: %d, res: %d (%s): %s",
+-    id, seq, res, strerror(res), message);
+-}
+-
+-static const struct pw_core_events coreEvents = {
+-  PW_VERSION_CORE_EVENTS,
+-  .error = coreErrorCallback,
+-};
+-
+-static bool startStream(struct pw_stream * stream, uint32_t node)
+-{
+-  char buffer[1024];
+-  struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+-  const struct spa_pod * param = spa_pod_builder_add_object(
+-    &builder, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+-    SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+-    SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+-    SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(6,
+-      SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA,
+-      SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx,
+-      SPA_VIDEO_FORMAT_xBGR_210LE, SPA_VIDEO_FORMAT_RGBA_F16),
+-    SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(
+-      &SPA_RECTANGLE(1920, 1080), &SPA_RECTANGLE(1, 1), &SPA_RECTANGLE(8192, 4320)),
+-    SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(
+-      &SPA_FRACTION(60, 1), &SPA_FRACTION(0, 1), &SPA_FRACTION(360, 1)));
+-
+-  return pw_stream_connect(stream, PW_DIRECTION_INPUT, node,
+-    PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, &param, 1) >= 0;
+-}
+-
+-static void streamProcessCallback(void * opaque)
+-{
+-  if (!this->hasFormat)
++failLocked:
++  pw_thread_loop_unlock(this->loop);
++fail:
++  DEBUG_ERROR("PipeWire capture initialization failed during %s", stage);
++  DEBUG_INFO("For a removed/wrong monitor, run bash run-guest.sh --choose-display from an accessible guest desktop");
++  pipewire_shutdown();
++  return false;
++}
++static void pipewire_stop(void)
++{
++  if (!this->loop || !this->started)
      return;
 -
 -  struct pw_buffer * pwBuffer = NULL;
@@ -664,10 +1295,7 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -  if (!pwBuffer)
 -  {
 -    DEBUG_WARN("Pipewire out of buffers");
-+  discardPending();
-+  this->hasFormat = false;
-+  if (!param)
-     return;
+-    return;
 -  }
 -
 -  struct spa_buffer * buffer = pwBuffer->buffer;
@@ -684,21 +1312,7 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -{
 -  switch (spa)
 -  {
-+  struct spa_video_info_raw info = {0};
-+  if (spa_format_video_raw_parse(param, &info) < 0 ||
-+      !info.size.width || !info.size.height ||
-+      info.size.width > 8192 || info.size.height > 8192)
-+    goto unsupported;
-+  if (spa_pod_find_prop(param, NULL, SPA_FORMAT_VIDEO_modifier))
-+  {
-+    DEBUG_ERROR("Unexpected DMA-BUF modifier: this capture path requires CPU-readable MemFd/MemPtr buffers");
-+    goto unsupported;
-+  }
-+  switch (info.format)
-+  {
-+    case SPA_VIDEO_FORMAT_BGRA:
-+    case SPA_VIDEO_FORMAT_BGRx: this->format = CAPTURE_FMT_BGRA; break;
-     case SPA_VIDEO_FORMAT_RGBA:
+-    case SPA_VIDEO_FORMAT_RGBA:
 -    case SPA_VIDEO_FORMAT_RGBx:
 -      return CAPTURE_FMT_RGBA;
 -
@@ -737,11 +1351,7 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -  }
 -
 -  this->width  = info.size.width;
-+    case SPA_VIDEO_FORMAT_RGBx: this->format = CAPTURE_FMT_RGBA; break;
-+    default: goto unsupported;
-+  }
-+  this->width = info.size.width;
-   this->height = info.size.height;
+-  this->height = info.size.height;
 -  this->format = convertSpaFormat(info.format);
 -  this->hdr    = info.format & (
 -      SPA_VIDEO_FORMAT_xBGR_210LE |
@@ -765,8 +1375,7 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -    SPA_PARAM_BUFFERS_dataType, SPA_POD_Int(1 << SPA_DATA_MemPtr));
 -  pw_stream_update_params(this->stream, &param, 1);
 -
-+  ++this->formatVer;
-   this->hasFormat = true;
+-  this->hasFormat = true;
 -  pw_thread_loop_signal(this->threadLoop, true);
 -}
 -
@@ -781,71 +1390,26 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -    DEBUG_ERROR("PipeWire stream error: %s", error);
 -}
 -
-+  uint8_t storage[512];
-+  struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage, sizeof(storage));
-+  const struct spa_pod * buffers = lgPipewireBuffers(&builder);
-+  if (pw_stream_update_params(this->stream, &buffers, 1) < 0)
-+    goto unsupported;
-+  DEBUG_INFO("Raw SDR capture: %ux%u, format %u", this->width,
-+    this->height, info.format);
-+  pw_thread_loop_signal(this->loop, false);
-+  return;
-+unsupported:
-+  DEBUG_ERROR("Unsupported PipeWire raw format/geometry/memory: format=%u size=%ux%u",
-+    info.format, info.size.width, info.size.height);
-+  this->failed = true;
-+  pw_thread_loop_signal(this->loop, false);
-+}
- static const struct pw_stream_events streamEvents = {
+-static const struct pw_stream_events streamEvents = {
 -  PW_VERSION_STREAM_EVENTS,
 -  .process       = streamProcessCallback,
 -  .state_changed = streamStateChangedCallback,
 -  .param_changed = streamParamChangedCallback,
-+  PW_VERSION_STREAM_EVENTS, .state_changed = streamState,
-+  .param_changed = streamFormat, .process = streamProcess,
-+  .remove_buffer = streamRemoveBuffer
- };
+-};
 -
- static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
- {
+-static bool pipewire_init(void * ivshmemBase, unsigned * alignSize)
+-{
 -  DEBUG_ASSERT(this);
 -  this->stop = false;
 -
-+  /* B7's per-frame allocation includes the page before FrameBuffer.data. */
-+  this->frameHeaderSize = *alignSize;
-+  /* B7 deinitializes capture whenever its last LGMP client disconnects, even
-+   * immediately after initial setup. Keep the consent/session and chosen
-+   * monitor alive across that idle transition; resume the SAME stream. */
-+  if (this->stream)
-+  {
-+    pw_thread_loop_lock(this->loop);
-+    this->stop = false;
-+    int status = this->failed ? -EPIPE : pw_stream_set_active(this->stream, true);
-+    pw_thread_loop_unlock(this->loop);
-+    if (status < 0)
-+    {
-+      DEBUG_ERROR("Cannot resume the selected monitor: %s", strerror(-status));
-+      return false;
-+    }
-+    DEBUG_INFO("Resuming the existing monitor session (no new chooser)");
-+    return true;
-+  }
-+  const char * stage = "opening the desktop portal";
-+  this->stop = this->failed = this->hasFormat = this->connected = false;
-+  this->warnedBuffer = false;
-+  this->loggedBuffer = this->loggedCopy = this->loggedWrite = this->warnedNoFrame = false;
-+  this->captureStartedAt = this->receivedBuffers = this->rejectedBuffers = 0;
-+  this->readyWidth = this->readyHeight = 0;
-   this->portal = portal_create();
-   if (!this->portal)
+-  this->portal = portal_create();
+-  if (!this->portal)
 -  {
 -    DEBUG_ERROR("Failed to create xdg-desktop-portal for screencasting");
 -    goto fail;
 -  }
 -
-+    goto fail;
-+  stage = "ScreenCast.CreateSession";
-   if (!portal_createScreenCastSession(this->portal, &this->sessionHandle))
+-  if (!portal_createScreenCastSession(this->portal, &this->sessionHandle))
 -  {
 -    DEBUG_ERROR("Failed to create ScreenCast session");
 -    goto fail;
@@ -882,31 +1446,8 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -  }
 -
 -  this->context = pw_context_new(pw_thread_loop_get_loop(this->threadLoop), NULL, 0);
-+    goto fail;
-+  stage = "ScreenCast.SelectSources";
-+  if (!portal_selectSource(this->portal, this->sessionHandle,
-+        option_get_bool("pipewire", "restore")))
-+    goto fail;
-+  stage = "ScreenCast.Start / monitor selection";
-+  uint32_t node = portal_getPipewireNode(this->portal, this->sessionHandle);
-+  if (!node)
-+    goto fail;
-+  stage = "ScreenCast.OpenPipeWireRemote";
-+  int fd = portal_openPipewireRemote(this->portal, this->sessionHandle);
-+  if (fd < 0)
-+    goto fail;
-+  stage = "creating the PipeWire thread loop";
-+  this->loop = pw_thread_loop_new("looking-glass-capture", NULL);
-+  if (!this->loop)
-+  {
-+    DEBUG_ERROR("pw_thread_loop_new: %s", strerror(errno));
-+    close(fd);
-+    goto fail;
-+  }
-+  stage = "creating the PipeWire context";
-+  this->context = pw_context_new(pw_thread_loop_get_loop(this->loop), NULL, 0);
-   if (!this->context)
-   {
+-  if (!this->context)
+-  {
 -    DEBUG_ERROR("Failed to create pipewire context");
 -    close(pipewireFd);
 -    goto fail;
@@ -922,46 +1463,22 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -  pw_thread_loop_lock(this->threadLoop);
 -
 -  this->core = pw_context_connect_fd(this->context, pipewireFd, NULL, 0);
-+    DEBUG_ERROR("pw_context_new: %s", strerror(errno));
-+    close(fd);
-+    goto fail;
-+  }
-+  stage = "starting the PipeWire thread loop";
-+  int status = pw_thread_loop_start(this->loop);
-+  if (status < 0)
-+  {
-+    DEBUG_ERROR("pw_thread_loop_start: %s", strerror(-status));
-+    close(fd);
-+    goto fail;
-+  }
-+  this->started = true;
-+  pw_thread_loop_lock(this->loop);
-+  stage = "connecting to the portal PipeWire remote";
-+  this->core = pw_context_connect_fd(this->context, fd, NULL, 0);
-   if (!this->core)
-   {
+-  if (!this->core)
+-  {
 -    DEBUG_ERROR("Failed to create pipewire core: %s", strerror(errno));
 -    pw_thread_loop_unlock(this->threadLoop);
 -    close(pipewireFd);
 -    goto fail;
 -  }
 -
-+    DEBUG_ERROR("pw_context_connect_fd: %s", strerror(errno));
-+    goto failLocked;
-+  }
-   pw_core_add_listener(this->core, &this->coreListener, &coreEvents, NULL);
+-  pw_core_add_listener(this->core, &this->coreListener, &coreEvents, NULL);
 -
 -  this->stream = pw_stream_new(this->core, "Looking Glass (host)", pw_properties_new(
 -    PW_KEY_MEDIA_TYPE, "Video",
 -    PW_KEY_MEDIA_CATEGORY, "Capture",
 -    PW_KEY_MEDIA_ROLE, "Screen", NULL));
-+  stage = "creating the PipeWire capture stream";
-+  this->stream = pw_stream_new(this->core, "Looking Glass Linux Guest",
-+    pw_properties_new(PW_KEY_NODE_NAME, "looking-glass-capture",
-+      PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY,
-+      "Capture", PW_KEY_MEDIA_ROLE, "Screen", NULL));
-   if (!this->stream)
-   {
+-  if (!this->stream)
+-  {
 -    DEBUG_ERROR("Failed to create pipewire stream");
 -    pw_thread_loop_unlock(this->threadLoop);
 -    goto fail;
@@ -970,10 +1487,7 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -  this->hasFormat     = false;
 -  this->formatChanged = false;
 -  this->frameData     = NULL;
-+    DEBUG_ERROR("pw_stream_new: %s", strerror(errno));
-+    goto failLocked;
-+  }
-   pw_stream_add_listener(this->stream, &this->streamListener, &streamEvents, NULL);
+-  pw_stream_add_listener(this->stream, &this->streamListener, &streamEvents, NULL);
 -
 -  if (!startStream(this->stream, pipewireNode))
 -  {
@@ -998,59 +1512,32 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -
 -  pw_thread_loop_accept(this->threadLoop);
 -
-+  uint8_t storage[1024];
-+  struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage, sizeof(storage));
-+  const unsigned fps = option_get_int("pipewire", "fps");
-+  const struct spa_pod * format = lgPipewireFormat(&builder, fps);
-+  stage = "connecting the PipeWire capture stream";
-+  status = pw_stream_connect(this->stream, PW_DIRECTION_INPUT, node,
-+        PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, &format, 1);
-+  if (status < 0)
-+  {
-+    DEBUG_ERROR("pw_stream_connect: %s", strerror(-status));
-+    goto failLocked;
-+  }
-+  stage = "negotiating the raw video format";
-+  struct timespec deadline;
-+  pw_thread_loop_get_time(this->loop, &deadline, 15 * SPA_NSEC_PER_SEC);
-+  while (!this->hasFormat && !this->failed)
-+    if (pw_thread_loop_timed_wait_full(this->loop, &deadline) < 0)
-+    {
-+      DEBUG_ERROR("Timed out waiting for a PipeWire video format");
-+      goto failLocked;
-+    }
-+  if (this->failed)
-+    goto failLocked;
-+  pw_thread_loop_unlock(this->loop);
-   return true;
-+failLocked:
-+  pw_thread_loop_unlock(this->loop);
- fail:
--  pipewire_deinit();
-+  DEBUG_ERROR("PipeWire capture initialization failed during %s", stage);
-+  DEBUG_INFO("For a removed/wrong monitor, run bash run-guest.sh --choose-display from an accessible guest desktop");
-+  pipewire_shutdown();
-   return false;
- }
--
- static void pipewire_stop(void)
- {
-+  if (!this->loop || !this->started)
-+    return;
 +  pw_thread_loop_lock(this->loop);
-   this->stop = true;
--  pw_stream_disconnect(this->stream);
--  pw_thread_loop_signal(this->threadLoop, false);
--}
--
++  this->stop = true;
 +  if (this->stream && pw_stream_set_active(this->stream, false) < 0)
 +    this->failed = true;
 +  discardPending();
 +  pw_thread_loop_signal(this->loop, false);
 +  pw_thread_loop_unlock(this->loop);
 +}
- static bool pipewire_deinit(void)
- {
++static bool pipewire_deinit(void)
++{
++  pipewire_stop();
+   return true;
+-fail:
+-  pipewire_deinit();
+-  return false;
+-}
+-
+-static void pipewire_stop(void)
+-{
+-  this->stop = true;
+-  pw_stream_disconnect(this->stream);
+-  pw_thread_loop_signal(this->threadLoop, false);
+-}
+-
+-static bool pipewire_deinit(void)
+-{
 -  if (this->stream)
 -  {
 -    pw_stream_disconnect(this->stream);
@@ -1071,8 +1558,6 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -  }
 -
 -  if (this->sessionHandle)
-+  pipewire_stop();
-+  return true;
 +}
 +static bool pipewire_shutdown(void)
 +{
@@ -1102,6 +1587,8 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -
 +  }
 +  this->portal = NULL;
++  lgKdeCapture_close(this->kde);
++  this->kde = NULL;
    return true;
  }
 -
@@ -1157,6 +1644,34 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +    this->warnedNoFrame = true;
 +  }
 +}
++static uint64_t monotonicNs(void)
++{
++  struct timespec now;
++  if (clock_gettime(CLOCK_MONOTONIC, &now)) return 0;
++  return (uint64_t)now.tv_sec * SPA_NSEC_PER_SEC + now.tv_nsec;
++}
++static void reportPerformance(void)
++{
++  uint64_t now = monotonicNs();
++  if (!this->statsTime)
++    goto reset;
++  if (now - this->statsTime < 5 * SPA_NSEC_PER_SEC) return;
++  double seconds = (now - this->statsTime) / 1e9;
++  uint64_t copies = this->copiedFrames - this->statsCopied;
++  uint64_t writes = this->writtenFrames - this->statsWritten;
++  DEBUG_INFO("Video rates: source=%.1f/s copied=%.1f/s uploaded=%.1f/s; copy=%.3f ms upload=%.3f ms; requested max=%u",
++    (this->receivedBuffers - this->statsReceived) / seconds, copies / seconds, writes / seconds,
++    copies ? (this->copyNs - this->statsCopyNs) / (copies * 1e6) : 0.0,
++    writes ? (this->writeNs - this->statsWriteNs) / (writes * 1e6) : 0.0,
++    this->requestedFPS);
++reset:
++  this->statsTime = now;
++  this->statsReceived = this->receivedBuffers;
++  this->statsCopied = this->copiedFrames;
++  this->statsWritten = this->writtenFrames;
++  this->statsCopyNs = this->copyNs;
++  this->statsWriteNs = this->writeNs;
++}
 +static CaptureResult rejectBuffer(const char * reason, const struct spa_data * data)
 +{
 +  ++this->rejectedBuffers;
@@ -1201,7 +1716,10 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +    this->capacity = layout.packedSize;
 +  }
 +  /* Copy before returning the buffer; geometry cannot change under this lock. */
++  uint64_t start = monotonicNs();
 +  lgFramePack(this->snapshot, data->data, &layout);
++  this->copyNs += monotonicNs() - start;
++  ++this->copiedFrames;
 +  this->readyWidth = this->width;
 +  this->readyHeight = this->height;
 +  this->readyVersion = this->formatVer;
@@ -1220,7 +1738,9 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 -  CaptureFrame * frame,
 +static CaptureResult pipewire_capture(unsigned index, FrameBuffer * target)
 +{
++  if (this->kde && !lgKdeCapture_alive(this->kde)) return CAPTURE_RESULT_ERROR;
 +  pw_thread_loop_lock(this->loop);
++  reportPerformance();
 +  reportNoFrame();
 +  struct timespec deadline;
 +  pw_thread_loop_get_time(this->loop, &deadline, SPA_NSEC_PER_SEC);
@@ -1310,8 +1830,11 @@ diff --git a/host/platform/Linux/capture/pipewire/src/pipewire.c b/host/platform
 +  if (maxFrameSize < this->frameHeaderSize ||
 +      size > maxFrameSize - this->frameHeaderSize || !this->snapshot)
 +    return CAPTURE_RESULT_ERROR;
++  uint64_t start = monotonicNs();
 +  if (!framebuffer_write(frame, this->snapshot, size))
 +    return CAPTURE_RESULT_ERROR;
++  this->writeNs += monotonicNs() - start;
++  ++this->writtenFrames;
 +  if (!this->loggedWrite)
 +  {
 +    DEBUG_INFO("First raw frame written to IVSHMEM: %ux%u, %zu bytes%s",
@@ -2036,3 +2559,114 @@ diff --git a/host/platform/Linux/capture/pipewire/src/portal.h b/host/platform/L
 +bool portal_selectSource(struct Portal * portal, const char * sessionHandle, bool restore);
  uint32_t portal_getPipewireNode(struct Portal * portal, const char * sessionHandle);
  int portal_openPipewireRemote(struct Portal * portal, const char * sessionHandle);
+diff --git a/host/platform/Linux/capture/pipewire/src/zkde-screencast-unstable-v1.xml b/host/platform/Linux/capture/pipewire/src/zkde-screencast-unstable-v1.xml
+new file mode 100644
+--- /dev/null
++++ b/host/platform/Linux/capture/pipewire/src/zkde-screencast-unstable-v1.xml
+@@ -0,0 +1,106 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<protocol name="zkde_screencast_unstable_v1">
++  <copyright><![CDATA[
++      SPDX-FileCopyrightText: 2020-2021 Aleix Pol Gonzalez <aleixpol@kde.org>
++
++    SPDX-License-Identifier: LGPL-2.1-or-later
++  ]]></copyright>
++    <interface name="zkde_screencast_unstable_v1" version="6">
++        <description summary="Protocol for managing PipeWire feeds of the different displays and windows">
++            Warning! The protocol described in this file is a desktop environment
++            implementation detail. Regular clients must not use this protocol.
++            Backward incompatible changes may be added without bumping the major
++            version of the extension.
++        </description>
++
++        <enum name="pointer">
++            <description summary="Stream consumer attachment attributes" />
++            <entry name="hidden" value="1" summary="No cursor"/>
++            <entry name="embedded" value="2" summary="Render the cursor on the stream"/>
++            <entry name="metadata" value="4" summary="Send metadata about where the cursor is through PipeWire"/>
++        </enum>
++
++        <request name="stream_output">
++            <description summary="requests a feed from a given source"/>
++            <arg name="stream" type="new_id" interface="zkde_screencast_stream_unstable_v1"/>
++            <arg name="output" type="object" interface="wl_output"/>
++            <arg name="pointer" type="uint" summary="Requested pointer mode"/>
++        </request>
++        <request name="stream_window">
++            <description summary="requests a feed from a given source"/>
++            <arg name="stream" type="new_id" interface="zkde_screencast_stream_unstable_v1"/>
++            <arg name="window_uuid" type="string" summary="window Identifier"/>
++            <arg name="pointer" type="uint" summary="Requested pointer mode"/>
++        </request>
++
++        <request name="destroy" type="destructor">
++            <description summary="Destroy the zkde_screencast_unstable_v1">
++                Destroy the zkde_screencast_unstable_v1 object.
++            </description>
++        </request>
++
++        <request name="stream_virtual_output" since="2">
++            <description summary="requests a feed from a new virtual output"/>
++            <arg name="stream" type="new_id" interface="zkde_screencast_stream_unstable_v1"/>
++            <arg name="name" type="string" summary="name of the created output"/>
++            <arg name="width" type="int" summary="Logical width resolution"/>
++            <arg name="height" type="int" summary="Logical height resolution"/>
++            <arg name="scale" type="fixed" summary="Scaling factor of the display where it's to be displayed"/>
++            <arg name="pointer" type="uint" summary="Requested pointer mode"/>
++        </request>
++
++        <request name="stream_region" since="3">
++            <description summary="requests a feed from region in the workspace">
++                Since version 5, the compositor will choose the highest scale
++                factor for the region if the given scale is 0.0.
++            </description>
++            <arg name="stream" type="new_id" interface="zkde_screencast_stream_unstable_v1"/>
++
++            <arg name="x" type="int" summary="Logical left position"/>
++            <arg name="y" type="int" summary="Logical top position"/>
++            <arg name="width" type="uint" summary="Logical width resolution"/>
++            <arg name="height" type="uint" summary="Logical height resolution"/>
++            <arg name="scale" type="fixed" summary="Scaling factor of the output recording"/>
++            <arg name="pointer" type="uint" summary="Requested pointer mode"/>
++        </request>
++
++        <request name="stream_virtual_output_with_description" since="4">
++            <description summary="requests a feed from a new virtual output"/>
++            <arg name="stream" type="new_id" interface="zkde_screencast_stream_unstable_v1"/>
++            <arg name="name" type="string" summary="name of the created output"/>
++            <arg name="description" type="string" summary="user visible description of the created output"/>
++            <arg name="width" type="int" summary="Logical width resolution"/>
++            <arg name="height" type="int" summary="Logical height resolution"/>
++            <arg name="scale" type="fixed" summary="Scaling factor of the display where it's to be displayed"/>
++            <arg name="pointer" type="uint" summary="Requested pointer mode"/>
++        </request>
++    </interface>
++
++    <interface name="zkde_screencast_stream_unstable_v1" version="6">
++        <request name="close" type="destructor">
++            <description summary="Indicates we are done with the stream and the communication is over."/>
++        </request>
++        <event name="closed">
++            <description summary="Notifies that the server has stopped the stream. Clients should now call close."/>
++        </event>
++        <event name="created">
++            <description summary="Notifies about a pipewire feed being created">
++                Deprecated since version 6, use the object serial from the serial event instead
++            </description>
++            <arg name="node" type="uint" summary="node of the pipewire buffer"/>
++        </event>
++        <event name="failed">
++            <description summary="Offers an error message so the client knows the created event will not arrive, and the client should close the resource."/>
++            <arg name="error" type="string" summary="A human readable translated error message."/>
++        </event>
++        <event name="serial" since="6">
++            <description summary="the pipewire object serial">
++                The pipewire object serial of the stream. Should be preferred over the node id which is prone to id reuse.
++                Will be sent before the created event.
++            </description>
++            <arg name="object_serial_hi" type="uint" summary="high bits of the pipewire object serial"/>
++            <arg name="object_serial_low" type="uint" summary="low bits of the pipewire object serial"/>
++        </event>
++    </interface>
++</protocol>
++

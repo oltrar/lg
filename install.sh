@@ -22,8 +22,13 @@ if [[ ${1:-} != --skip-device-setup ]]; then
 fi
 bash "$ROOT/setup-startup.sh" repair
 CONFIG=${XDG_CONFIG_HOME:-"$HOME/.config"}/looking-glass-linux-wayland
-(umask 077; : > "$CONFIG/choose-next")
-printf '\nChoose the NVIDIA/dummy-plug monitor in the sharing dialog.\n'
+desktop=${XDG_CURRENT_DESKTOP:-}
+if [[ ${desktop^^} == *KDE* ]]; then
+  bash "$ROOT/scripts/select-display.sh"
+else
+  (umask 077; : > "$CONFIG/choose-next")
+  printf '\nChoose the NVIDIA/dummy-plug monitor and allow restoring this selection in the sharing dialog.\n'
+fi
 bash "$ROOT/setup-startup.sh" start
 if ! systemctl --user start looking-glass-host.service; then
   printf '\nSetup could not verify raw video. Recent service output:\n' >&2

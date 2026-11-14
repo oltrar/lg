@@ -1,5 +1,61 @@
 # Validation record
 
+## Unattended KDE and upload performance — 2026-11-13
+
+The user now confirms the NVIDIA/dummy-plug screen is selected and video works
+after setup. Rebooting with QXL removed still leaves a sharing chooser they
+cannot operate. They report about 24 UPS and 50 client FPS during video/gaming,
+at 2560x1440 with both 120 Hz and 165 Hz desktop modes. A 24 Hz display mode is
+therefore ruled out; the full remaining performance bottleneck is not measured
+on their hardware yet.
+
+KDE portal source review shows outputs can be restored by screen position,
+which can change when removing QXL. Add a KDE-specific native KWin capture
+integration, selected explicitly by wl_output connector name during setup and
+saved privately. At login it requests that same output, without portal tokens
+or a hidden chooser. Missing/disabled outputs fail rather than falling back to
+QXL. Installed per-executable desktop descriptors declare the capture protocol
+for KWin's normal capability checks; global permission checks are never disabled.
+GNOME retains the portal backend and its normal permission policy.
+
+Plain PCI mapping previously always used ordinary resource2. Linux exposes a
+write-combining resource2_wc alias for prefetchable BARs on supported platforms.
+Prefer that alias, grant its scoped permissions during install/udev setup, and
+report any ordinary-mapping fallback. Add SFENCE before publishing B7 ready
+byte counts so NT/WC pixel stores complete first. This preserves the B7 protocol.
+The QEMU test has actually mapped the WC alias as UID 1000, without KVMFR,
+and verified guest-to-physical-host coherence. No NVIDIA FPS claim is inferred
+from QEMU/TCG timings.
+
+Automatic capture FPS now follows KDE's selected output refresh (up to 360);
+portal fallback defaults to 60. Selecting an output migrates the previous exact
+LG_FPS=60 default to auto; other explicit caps are preserved. The source mode
+and resolved requested maximum are logged. Every five active seconds, rate
+and copy/upload timing counters distinguish source, capture and publication.
+B7 client FPS counts rendering; UPS counts guest frame uploads. A video with
+24 changing frames/sec can naturally produce 24 UPS, but that does not explain
+the user's gaming result without measurements.
+
+Tests use a real Wayland client/server exchange for enumeration and selected
+connector capture, different positions/120-165 Hz modes, compositor restart and
+removing QXL. They check missing-output refusal and clean session destruction.
+Full PipeWire-to-B7 pixel verification also passes on both portal and native
+KDE paths, with idle/reconnect handling, on native Arch and Debian CI. Those
+compositor/portal endpoints are fixtures. Additional real KWin software/virtual
+compositor validation across two starts is run separately; its final result is
+recorded on the PR. This test targets current Arch/KWin, matching CachyOS. Its
+GPU-less software renderer needs /dev/udmabuf. A disposable QEMU/TCG VM boots
+a stock Debian kernel and the current Arch container's filesystem for this
+test, because the hosted runner's Azure kernel omits that device. It has no
+network or physical GPU. This device is not used by our capture transport or
+required in a GPU-passthrough VM.
+The test waits for KWin's compositor to be active before requesting a stream.
+The older Debian KWin 5.27 virtual EGL backend omits outputChange emission, which
+its output screen-cast source requires, so it cannot validate pixel delivery
+in that artificial environment. Debian still builds/runs the protocol/transport
+fixtures. This environment still has no NVIDIA passthrough VM or
+physical-host renderer and cannot certify a hardware upload rate.
+
 ## Main installation, missing units, topology changes and real video — 2026-11-13
 
 The new full PipeWire-to-LGMP integration exposed a publication failure that

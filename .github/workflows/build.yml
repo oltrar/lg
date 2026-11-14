@@ -9,7 +9,7 @@ jobs:
       # kernels omit it. No extra module is needed in the user's GPU VM.
       - name: Prepare compositor test kernel
         run: |
-          docker run --rm -v "$GITHUB_WORKSPACE:/project" -w /project debian:bookworm bash -euc '
+          docker run --rm -v "$GITHUB_WORKSPACE:/project" -w /project debian:trixie bash -euc '
             apt-get update
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends linux-image-amd64 busybox-static cpio gzip kmod
             bash tests/kwin-vm-kernel.sh
